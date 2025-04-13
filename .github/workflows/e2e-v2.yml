@@ -2,7 +2,7 @@ name: E2E Test(API v2 - Rust Client)
 
 on:
   push:
-    branches: [main, release-*]
+    branches: [main, release-*, test/*]
     paths-ignore: ["**.md", "**.png", "**.jpg", "**.svg", "**/docs/**"]
   pull_request:
     branches: [main, release-*]
