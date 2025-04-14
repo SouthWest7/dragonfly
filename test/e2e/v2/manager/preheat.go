@@ -256,8 +256,8 @@ var _ = Describe("Preheat with Manager", func() {
 
 			var preheatedSeedClient *util.PodExec
 
-            taskIDCmd := fmt.Sprintf("grep '%s' /var/log/dragonfly/dfdaemon/*", testFile.GetTaskID())
-            successCmd := fmt.Sprintf("%s | grep 'download task succeeded'", taskIDCmd)
+			taskIDCmd := fmt.Sprintf("grep -a '%s' /var/log/dragonfly/dfdaemon/*", testFile.GetTaskID())
+			successCmd := fmt.Sprintf("%s | grep -a 'download task succeeded'", taskIDCmd)
 
 			for i := 0; i < 3; i++ {
 				seedClient, err := util.SeedClientExec(i)
