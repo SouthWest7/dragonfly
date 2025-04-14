@@ -294,7 +294,7 @@ var _ = Describe("Preheat with Manager", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(testFile.GetSha256()).To(Equal(sha256sum))
 
-			out, err = preheatedSeedClient.Command("grep", "-E", "\"(put task to cache|put piece to cache|get piece from cache)\"", "/var/log/dragonfly/dfdaemon/*").CombinedOutput()
+			out, err = preheatedSeedClient.Command("grep", "-E", "\"put task to cache|put piece to cache|get piece from cache\"", "/var/log/dragonfly/dfdaemon/*").CombinedOutput()
 			fmt.Println(err)
 			Expect(err).NotTo(HaveOccurred())
 			logs := string(out)
