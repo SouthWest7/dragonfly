@@ -58,6 +58,14 @@ func TestEvaluator_New(t *testing.T) {
 			},
 		},
 		{
+			name:      "new evaluator with custom algorithm",
+			algorithm: "custom",
+			expect: func(t *testing.T, e any) {
+				assert := assert.New(t)
+				assert.Equal(reflect.TypeOf(e).Elem().Name(), "customEvaluator")
+			},
+		},
+		{
 			name:      "new evaluator with empty string",
 			algorithm: "",
 			expect: func(t *testing.T, e any) {
