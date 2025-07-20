@@ -532,7 +532,20 @@ func (s *scheduling) filterCandidateParents(peer *standard.Peer, blocklist set.S
 		candidateParents   []*standard.Peer
 		candidateParentIDs []string
 	)
-	for _, candidateParent := range peer.Task.LoadRandomPeers(uint(filterParentLimit)) {
+
+	var peers []*standard.Peer
+	if peer.AllocatedParents.Len() > 0 {
+		peerIDs := peer.AllocatedParents.Values()
+		for _, peerID := range peerIDs {
+			if allocatedPeer, found := peer.Task.LoadPeer(peerID); found {
+				peers = append(peers, allocatedPeer)
+			}
+		}
+	} else {
+		peers = peer.Task.LoadRandomPeers(uint(filterParentLimit))
+	}
+
+	for _, candidateParent := range peers {
 		// Candidate parent is in blocklist.
 		if blocklist.Contains(candidateParent.ID) {
 			peer.Log.Debugf("parent %s host %s is not selected because it is in blocklist", candidateParent.ID, candidateParent.Host.ID)

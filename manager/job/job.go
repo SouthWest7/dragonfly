@@ -41,6 +41,7 @@ type Job struct {
 	Preheat
 	SyncPeers
 	Task
+	Distribute
 }
 
 // New returns a new Job.
@@ -77,6 +78,7 @@ func New(cfg *config.Config, gdb *gorm.DB) (*Job, error) {
 		Preheat:   newPreheat(j, cfg.Job.Preheat.RegistryTimeout, certPool, cfg.Job.Preheat.TLS.InsecureSkipVerify),
 		SyncPeers: syncPeers,
 		Task:      newTask(j),
+		Distribute: newDistribute(j),
 	}, nil
 }
 

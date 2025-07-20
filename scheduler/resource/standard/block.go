@@ -1,0 +1,92 @@
+/*
+ *     Copyright 2025 The Dragonfly Authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package standard
+
+import (
+	"fmt"
+	"time"
+)
+
+// Block represents a file block with its metadata
+type Block struct {
+	// Number is the block number/id
+	Number int32
+
+	// Offset is the start offset of this block in the file
+	Offset uint
+
+	// Length is the length of this block in bytes
+	Length uint
+
+	// FileID is the file id associated with this block
+	FileID string
+
+	// TaskID is the task id associated with this block
+	TaskID string
+
+	// PeerID is the peer id that is downloading/has downloaded this block
+	PeerID string
+
+	// ParentID is the parent id that is uploading this block
+	ParentID string
+
+	// Finished indicates if this block has been downloaded (cached status)
+	Finished bool
+
+	// CreatedAt is the time when block was created
+	CreatedAt time.Time
+
+	// UpdatedAt is the time when block was last updated
+	UpdatedAt time.Time
+}
+
+// NewBlock creates a new block instance
+func NewBlock(number int32, offset, length uint, taskID string) *Block {
+	return &Block{
+		Number:    number,
+		Offset:    offset,
+		Length:    length,
+		TaskID:    taskID,
+		Finished:  false,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+}
+
+// GetHTTPRange returns the HTTP range string for this block
+func (b *Block) GetHTTPRange() string {
+	endOffset := b.Offset + b.Length - 1
+	return fmt.Sprintf("bytes=%d-%d", b.Offset, endOffset)
+}
+
+// GetEndOffset returns the end offset of this block
+func (b *Block) GetEndOffset() uint {
+	return b.Offset + b.Length - 1
+}
+
+// AssignToPeer assigns this block to a specific peer
+func (b *Block) AssignToPeer(peerID string) {
+	b.PeerID = peerID
+	b.UpdatedAt = time.Now()
+}
+
+// Reset resets the block state (removes peer assignment and completion status)
+func (b *Block) Reset() {
+	b.PeerID = ""
+	b.Finished = false
+	b.UpdatedAt = time.Now()
+}

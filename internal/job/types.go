@@ -111,3 +111,84 @@ type DeleteFailureTask struct {
 	HostType    string `json:"host_type"`
 	Description string `json:"description"`
 }
+
+// DistributeRequest defines the request parameters for distribute.
+type DistributeRequest struct {
+	// URL is the download URL for the file.
+	URL string `json:"url" validate:"required,url"`
+
+	// PieceLength is the piece length for the file.
+	PieceLength *uint64 `json:"piece_length" validate:"omitempty,gte=4194304"`
+
+	// BlockLength is the block length for the file.
+	BlockLength *uint64 `json:"block_length" validate:"omitempty,gte=4194304"`
+
+	// Tag is the tag for distribute.
+	Tag string `json:"tag" validate:"omitempty"`
+
+	// Application is the application string for distribute.
+	Application string `json:"application" validate:"omitempty"`
+
+	// FilteredQueryParams is the filtered query params for distribute.
+	FilteredQueryParams string `json:"filtered_query_params" validate:"omitempty"`
+
+	// Headers is the http headers for authentication.
+	Headers map[string]string `json:"headers" validate:"omitempty"`
+}
+
+// DistributeResponse defines the response parameters for distribute.
+type DistributeResponse struct {
+	// SuccessTasks is the list of successful distribute tasks.
+	SuccessTasks []*DistributeSuccessTask `json:"success_tasks"`
+
+	// FailureTasks is the list of failed distribute tasks.
+	FailureTasks []*DistributeFailureTask `json:"failure_tasks"`
+
+	// SchedulerClusterID is the ID of the scheduler cluster.
+	SchedulerClusterID uint `json:"scheduler_cluster_id"`
+
+	// TotalScheduled is the total number of scheduled downloads.
+	TotalScheduled int `json:"total_scheduled"`
+
+	// ActiveDownloads is the number of active downloads.
+	ActiveDownloads int `json:"active_downloads"`
+}
+
+// DistributeSuccessTask defines the response parameters for successful distribute.
+type DistributeSuccessTask struct {
+	// URL is the download URL.
+	URL string `json:"url"`
+
+	// Hostname is the hostname of the target host.
+	Hostname string `json:"hostname"`
+
+	// IP is the IP address of the target host.
+	IP string `json:"ip"`
+
+	// TaskID is the ID of the download task.
+	TaskID string `json:"task_id"`
+
+	// BlockID is the ID of the block being downloaded.
+	BlockID int `json:"block_id"`
+
+	// Rate is the download rate in bytes per second.
+	Rate uint64 `json:"rate"`
+
+	// EstimatedEndTime is the estimated end time of the download.
+	EstimatedEndTime time.Time `json:"estimated_end_time"`
+}
+
+// DistributeFailureTask defines the response parameters for failed distribute.
+type DistributeFailureTask struct {
+	// URL is the download URL.
+	URL string `json:"url"`
+
+	// Hostname is the hostname of the target host.
+	Hostname string `json:"hostname"`
+
+	// IP is the IP address of the target host.
+	IP string `json:"ip"`
+
+	// Description is the error description.
+	Description string `json:"description"`
+}

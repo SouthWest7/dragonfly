@@ -176,6 +176,9 @@ type Peer struct {
 	// BlockParents is bad parents ids.
 	BlockParents set.SafeSet[string]
 
+	// AllocatedParents is allocated parents ids.
+	AllocatedParents set.SafeSet[string]
+
 	// NeedBackToSource needs downloaded from source.
 	//
 	// When peer is registering, at the same time,
@@ -210,6 +213,7 @@ func NewPeer(id string, task *Task, host *Host, options ...PeerOption) *Peer {
 		Task:                    task,
 		Host:                    host,
 		BlockParents:            set.NewSafeSet[string](),
+		AllocatedParents:        set.NewSafeSet[string](),
 		NeedBackToSource:        atomic.NewBool(false),
 		PieceUpdatedAt:          atomic.NewTime(time.Now()),
 		CreatedAt:               atomic.NewTime(time.Now()),

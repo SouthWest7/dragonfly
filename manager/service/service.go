@@ -121,6 +121,7 @@ type Service interface {
 	CreateGetTaskJob(context.Context, types.CreateGetTaskJobRequest) (*models.Job, error)
 	CreateGetImageDistributionJob(context.Context, types.CreateGetImageDistributionJobRequest) (*types.CreateGetImageDistributionJobResponse, error)
 	CreateGCJob(context.Context, types.CreateGCJobRequest) (*models.Job, error)
+	CreateDistributeJob(context.Context, types.CreateDistributeJobRequest) (*models.Job, error)
 	DestroyJob(context.Context, uint) error
 	UpdateJob(context.Context, uint, types.UpdateJobRequest) (*models.Job, error)
 	GetJob(context.Context, uint) (*models.Job, error)

@@ -380,3 +380,43 @@ type GCArgs struct {
 	// Type is the type of the job.
 	Type string `json:"type" binding:"required,oneof=audit job"`
 }
+
+type CreateDistributeJobRequest struct {
+	// BIO is the description of the job.
+	BIO string `json:"bio" binding:"omitempty"`
+
+	// Type is the type of the job.
+	Type string `json:"type" binding:"required"`
+
+	// Args is the arguments of the distribute job.
+	Args DistributeArgs `json:"args" binding:"required"`
+
+	// UserID is the user id of the job.
+	UserID uint `json:"user_id" binding:"omitempty"`
+
+	// SchedulerClusterIDs is the scheduler cluster ids of the job.
+	SchedulerClusterIDs []uint `json:"scheduler_cluster_ids" binding:"omitempty"`
+}
+
+type DistributeArgs struct {
+	// URL is the download URL for the file.
+	URL string `json:"url" binding:"required,url"`
+
+	// PieceLength is the piece length(bytes) for downloading file.
+	PieceLength *uint64 `json:"piece_length" binding:"omitempty,gte=4194304,lte=67108864"`
+
+	// BlockLength is the block length for the file.
+	BlockLength *uint64 `json:"block_length" binding:"omitempty,gte=4194304"`
+
+	// Tag is the tag for distribute.
+	Tag string `json:"tag" binding:"omitempty"`
+
+	// Application is the application string for distribute.
+	Application string `json:"application" binding:"omitempty"`
+
+	// FilteredQueryParams is the filtered query params for distribute.
+	FilteredQueryParams string `json:"filtered_query_params" binding:"omitempty"`
+
+	// Headers is the http headers for authentication.
+	Headers map[string]string `json:"headers" binding:"omitempty"`
+}

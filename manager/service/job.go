@@ -173,6 +173,60 @@ func (s *service) CreatePreheatJob(ctx context.Context, json types.CreatePreheat
 	return &job, nil
 }
 
+// CreateDistributeJob creates a distribute job.
+func (s *service) CreateDistributeJob(ctx context.Context, json types.CreateDistributeJobRequest) (*models.Job, error) {
+	if json.Args.PieceLength == nil {
+		json.Args.PieceLength = new(uint64)
+		*json.Args.PieceLength = 4194304
+	}
+
+	if json.Args.BlockLength == nil {
+		json.Args.BlockLength = new(uint64)
+		*json.Args.BlockLength = 4194304
+	}
+
+	args, err := structure.StructToMap(json.Args)
+	if err != nil {
+		logger.Errorf("convert distribute args to map failed: %w", err)
+		return nil, err
+	}
+
+	schedulers, err := s.findAllSchedulersInClusters(ctx, json.SchedulerClusterIDs)
+	if err != nil {
+		logger.Errorf("find schedulers in clusters failed: %w", err)
+		return nil, err
+	}
+
+	groupJobState, err := s.job.CreateDistribute(ctx, schedulers, json.Args)
+	if err != nil {
+		logger.Errorf("create distribute job failed: %w", err)
+		return nil, err
+	}
+
+	var schedulerClusters []models.SchedulerCluster
+	for _, scheduler := range schedulers {
+		schedulerClusters = append(schedulerClusters, scheduler.SchedulerCluster)
+	}
+
+	job := models.Job{
+		TaskID:            groupJobState.GroupUUID,
+		BIO:               json.BIO,
+		Type:              json.Type,
+		State:             groupJobState.State,
+		Args:              args,
+		UserID:            json.UserID,
+		SchedulerClusters: schedulerClusters,
+	}
+
+	if err := s.db.WithContext(ctx).Create(&job).Error; err != nil {
+		logger.Errorf("create distribute job failed: %w", err)
+		return nil, err
+	}
+
+	go s.pollingJob(context.Background(), internaljob.DistributeJob, job.ID, job.TaskID, 30, 300, 16)
+	return &job, nil
+}
+
 func (s *service) CreateGetTaskJob(ctx context.Context, json types.CreateGetTaskJobRequest) (*models.Job, error) {
 	if json.Args.FilteredQueryParams == "" {
 		json.Args.FilteredQueryParams = http.RawDefaultFilteredQueryParams

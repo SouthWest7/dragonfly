@@ -41,6 +41,9 @@ const (
 
 	// GCJob is the name of gc job.
 	GCJob = "gc"
+
+	// DistributeJob is the name of distribute job.
+	DistributeJob = "distribute"
 )
 
 // Machinery server configuration.

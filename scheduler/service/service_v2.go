@@ -1574,6 +1574,7 @@ func (v *V2) handleResource(_ context.Context, stream schedulerv2.Scheduler_Anno
 		}
 
 		peer = standard.NewPeer(peerID, task, host, options...)
+		standard.AssignBlockToPeer(task, host, peer)
 		v.resource.PeerManager().Store(peer)
 	}
 

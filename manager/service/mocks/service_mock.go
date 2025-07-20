@@ -205,6 +205,21 @@ func (mr *MockServiceMockRecorder) CreateDeleteTaskJob(arg0, arg1 any) *gomock.C
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreateDeleteTaskJob", reflect.TypeOf((*MockService)(nil).CreateDeleteTaskJob), arg0, arg1)
 }
 
+// CreateDistributeJob mocks base method.
+func (m *MockService) CreateDistributeJob(arg0 context.Context, arg1 types.CreateDistributeJobRequest) (*models.Job, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "CreateDistributeJob", arg0, arg1)
+	ret0, _ := ret[0].(*models.Job)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// CreateDistributeJob indicates an expected call of CreateDistributeJob.
+func (mr *MockServiceMockRecorder) CreateDistributeJob(arg0, arg1 any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CreateDistributeJob", reflect.TypeOf((*MockService)(nil).CreateDistributeJob), arg0, arg1)
+}
+
 // CreateGCJob mocks base method.
 func (m *MockService) CreateGCJob(arg0 context.Context, arg1 types.CreateGCJobRequest) (*models.Job, error) {
 	m.ctrl.T.Helper()

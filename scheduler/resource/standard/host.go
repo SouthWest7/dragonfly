@@ -217,6 +217,12 @@ type Host struct {
 	// PeerCount is peer count.
 	PeerCount *atomic.Int32
 
+	// File sync map.
+	Files *sync.Map
+
+	// FileCount is file count.
+	FileCount *atomic.Int32
+
 	// CreatedAt is host create time.
 	CreatedAt *atomic.Time
 
@@ -319,11 +325,17 @@ type Network struct {
 	// Download rate limit of the host, unit is byte/s.
 	DownloadRateLimit uint64
 
+	// Allocated download rate of the host, unit is byte/s.
+	AllocatedDownloadRate uint64
+
 	// Upload rate of the host, unit is byte/s.
 	UploadRate uint64
 
 	// Upload rate limit of the host, unit is byte/s.
 	UploadRateLimit uint64
+
+	// Allocated upload rate of the host, unit is byte/s.
+	AllocatedUploadRate uint64
 }
 
 // Build contains content for build.
@@ -399,6 +411,8 @@ func NewHost(
 		UploadFailedCount:     atomic.NewInt64(0),
 		Peers:                 &sync.Map{},
 		PeerCount:             atomic.NewInt32(0),
+		Files:                 &sync.Map{},
+		FileCount:             atomic.NewInt32(0),
 		CreatedAt:             atomic.NewTime(time.Now()),
 		UpdatedAt:             atomic.NewTime(time.Now()),
 		Log:                   logger.WithHost(id, hostname, ip),
@@ -461,4 +475,54 @@ func (h *Host) FreeUploadCount() int32 {
 // IsSeedPeer return whether the host is seed peer.
 func (h *Host) IsSeedPeer() bool {
 	return h.Type != types.HostTypeNormal
+}
+
+// LoadFile returns file for a key.
+func (h *Host) LoadFile(key string) (*File, bool) {
+	rawFile, loaded := h.Files.Load(key)
+	if !loaded {
+		return nil, false
+	}
+
+	return rawFile.(*File), loaded
+}
+
+// StoreFile stores file.
+func (h *Host) StoreFile(file *File) {
+	file.Host = h // Set the host reference so file can access peer states
+	h.Files.Store(file.ID, file)
+	h.FileCount.Inc()
+}
+
+// DeleteFile deletes file for a key.
+func (h *Host) DeleteFile(key string) {
+	if _, loaded := h.Files.LoadAndDelete(key); loaded {
+		h.FileCount.Dec()
+	}
+}
+
+// AllocateRate allocates the rate for a host.
+func (h *Host) AllocateRate(rate uint64, isUpload bool) {
+	if isUpload {
+		h.Network.AllocatedUploadRate += rate
+	} else {
+		h.Network.AllocatedDownloadRate += rate
+	}
+}
+
+// ReleaseRate releases the rate for a host.
+func (h *Host) ReleaseRate(rate uint64, isUpload bool) {
+	if isUpload {
+		if h.Network.AllocatedUploadRate >= rate {
+			h.Network.AllocatedUploadRate -= rate
+		} else {
+			h.Network.AllocatedUploadRate = 0
+		}
+	} else {
+		if h.Network.AllocatedDownloadRate >= rate {
+			h.Network.AllocatedDownloadRate -= rate
+		} else {
+			h.Network.AllocatedDownloadRate = 0
+		}
+	}
 }
