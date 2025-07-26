@@ -408,6 +408,9 @@ type DistributeArgs struct {
 	// BlockLength is the block length for the file.
 	BlockLength *uint64 `json:"block_length" binding:"omitempty,gte=4194304"`
 
+	// RateLimit is the rate limit for the distribute.
+	RateLimit *uint64 `json:"rate_limit" binding:"omitempty,gte=1024"`
+
 	// Tag is the tag for distribute.
 	Tag string `json:"tag" binding:"omitempty"`
 

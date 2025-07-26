@@ -35,9 +35,6 @@ const (
 
 	// PluginAlgorithm is a scheduling algorithm based on plugin extension.
 	PluginAlgorithm = "plugin"
-
-	// CustomAlgorithm is a custom scheduling algorithm.
-	CustomAlgorithm = "custom"
 )
 
 const (
@@ -89,8 +86,6 @@ func New(algorithm string, pluginDir string) Evaluator {
 	// TODO Implement MLAlgorithm.
 	case MLAlgorithm, DefaultAlgorithm:
 		return newEvaluatorBase()
-	case CustomAlgorithm:
-		return newCustomEvaluator()
 	}
 
 	return newEvaluatorBase()

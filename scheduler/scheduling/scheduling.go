@@ -33,6 +33,8 @@ import (
 	schedulerv1 "d7y.io/api/v2/pkg/apis/scheduler/v1"
 	schedulerv2 "d7y.io/api/v2/pkg/apis/scheduler/v2"
 
+	logger "d7y.io/dragonfly/v2/internal/dflog"
+
 	"d7y.io/dragonfly/v2/pkg/container/set"
 	"d7y.io/dragonfly/v2/pkg/types"
 	"d7y.io/dragonfly/v2/scheduler/config"
@@ -536,6 +538,7 @@ func (s *scheduling) filterCandidateParents(peer *standard.Peer, blocklist set.S
 	var peers []*standard.Peer
 	if peer.AllocatedParents.Len() > 0 {
 		peerIDs := peer.AllocatedParents.Values()
+		logger.Infof("[distribute]: allocated parents is %#v", peerIDs)
 		for _, peerID := range peerIDs {
 			if allocatedPeer, found := peer.Task.LoadPeer(peerID); found {
 				peers = append(peers, allocatedPeer)
@@ -609,6 +612,7 @@ func (s *scheduling) filterCandidateParents(peer *standard.Peer, blocklist set.S
 	}
 
 	peer.Log.Infof("filter candidate parents is %#v", candidateParentIDs)
+	logger.Infof("[distribute]: filter candidate parents is %#v", candidateParentIDs)
 	return candidateParents
 }
 

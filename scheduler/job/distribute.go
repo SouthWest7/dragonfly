@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"io"
 
@@ -64,104 +65,171 @@ type Distribute struct {
 }
 
 // NewDistribute creates a new event-driven scheduler
-func NewDistribute(resource standard.Resource, file *standard.File) *Distribute {
+func NewDistribute(resource standard.Resource, file *standard.File, rateLimit *uint64) *Distribute {
 	return &Distribute{
 		resource:          resource,
 		file:              file,
 		events:            &sync.Map{},
 		downloadQueue:     make([]string, 0),
 		uploadQueue:       make(map[int32][]string),
-		rateLimit:         10 * 1024 * 1024,
+		rateLimit:         *rateLimit,
 		bandwidthUseRatio: 0.8,
 	}
 }
 
-// Serve starts the event-driven file distribution
-func (es *Distribute) Serve(ctx context.Context, fileID string, taskID string, headers map[string]string, pieceLength *uint64, contentForCalculatingTaskId *string) error {
+// Run starts the event-driven file distribution
+func (es *Distribute) Run(ctx context.Context, fileID string, taskID string, url string, headers map[string]string, pieceLength *uint64, contentForCalculatingTaskId *string) error {
 	if es.file == nil || es.file.ID != fileID {
 		return fmt.Errorf("file %s not found in scheduler", fileID)
 	}
 
-	logger.Infof("Starting event-driven file distribution for %s with %d blocks", fileID, es.file.TotalBlocks)
-
 	// Initialize scheduler state
 	es.createUploadQueue()
-	es.createDownloadQueue()
 
+	count := 0
 	// Main event-driven scheduling loop
-	return es.run(ctx, taskID, headers, pieceLength, contentForCalculatingTaskId)
-}
-
-// run executes the main event-driven scheduling algorithm
-func (es *Distribute) run(ctx context.Context, taskID string, headers map[string]string, pieceLength *uint64, contentForCalculatingTaskId *string) error {
 	for {
 		// Check if distribution is finished
 		if es.isDistributionFinished() {
-			logger.Infof("File distribution completed")
+			logger.Infof("[distribute]: file distribution completed, count: %d", count)
 			return nil
 		}
 
-		// Check if download queue is empty and no events are running
-		es.downloadQueueMu.RLock()
-		downloadQueueEmpty := len(es.downloadQueue) == 0
-		es.downloadQueueMu.RUnlock()
+		es.createDownloadQueue()
 
-		if downloadQueueEmpty {
-			logger.Infof("No more downloads to schedule and no events running")
-			return nil
+		hostID := es.downloadQueue[0]
+		logger.Infof("[distribute]: downloading task %s to peer %s, count: %d", taskID, hostID, count)
+
+		if es.canScheduleDownload(hostID) {
+			blockNumber := es.selectBlockForPeer(hostID)
+			if blockNumber != -1 {
+				logger.Infof("[distribute]: selected block %d for peer %s, count: %d", blockNumber, hostID, count)
+				eventID := standard.EventID(hostID, es.file.ID, blockNumber)
+				event := es.createEvent(eventID, blockNumber, taskID, hostID)
+				logger.Infof("[distribute]: created event %s for block %d, count: %d", eventID, blockNumber, count)
+				if event != nil {
+					es.StoreEvent(event)
+
+					go es.downloadBlock(ctx, event, taskID, url, headers, pieceLength, contentForCalculatingTaskId, count)
+
+					logger.Debugf("[distribute]: scheduled download: block %d to peer %s, count: %d", blockNumber, hostID, count)
+				}
+			}
 		}
 
-		es.download(ctx, taskID, headers, pieceLength, contentForCalculatingTaskId)
+		time.Sleep(100 * time.Millisecond)
+		logger.Infof("[distribute]: scheduled one download for peer %s, count: %d", hostID, count)
+		count++
 	}
 }
 
-// download schedules the next download
-func (es *Distribute) download(ctx context.Context, taskID string, headers map[string]string, pieceLength *uint64, contentForCalculatingTaskId *string) bool {
+// downloadBlock executes the download
+func (es *Distribute) downloadBlock(ctx context.Context, event *standard.Event, taskID string, url string, headers map[string]string, pieceLength *uint64, contentForCalculatingTaskId *string, count int) {
+	logger.Infof("[distribute]: downloading block %d to peer %s, count: %d", event.BlockNumber, event.DownloadHost, count)
 
-	if len(es.downloadQueue) == 0 {
-		return false
+	host, exists := es.resource.HostManager().Load(event.DownloadHost)
+	if !exists {
+		logger.Errorf("[distribute]: host %s not found for download", event.DownloadHost)
+		return
 	}
 
-	// Take the first element from the queue (FIFO)
-	hostID := es.downloadQueue[0]
+	file, found := host.LoadFile(es.file.ID)
+	if !found {
+		logger.Errorf("[distribute]: file %s not found on host %s", es.file.ID, event.DownloadHost)
+		return
+	}
 
-	if es.canScheduleDownload(hostID) {
-		blockNumber := es.selectBlockForPeer(hostID)
-		if blockNumber != -1 {
-			eventID := standard.EventID(hostID, es.file.ID, blockNumber)
-			event := es.createEvent(eventID, blockNumber, taskID, hostID)
-			if event != nil {
-				es.StoreEvent(event)
-				// Remove the first element from the queue
-				es.downloadQueueMu.Lock()
-				es.downloadQueue = es.downloadQueue[1:]
-				es.downloadQueueMu.Unlock()
+	// Get block information to create Range
+	block, exists := file.GetBlock(event.BlockNumber)
+	if !exists {
+		logger.Errorf("[distribute]: block %d not found in file %s", event.BlockNumber, es.file.ID)
+		return
+	}
 
-				go es.downloadBlock(ctx, event, taskID, headers, pieceLength, contentForCalculatingTaskId)
+	// Create commonv2.Range directly instead of HTTP header
+	blockRange := &commonv2.Range{
+		Start:  uint64(block.Offset),
+		Length: uint64(block.Length),
+	}
 
-				logger.Debugf("Scheduled download: block %d to peer %s", blockNumber, hostID)
-				return true
+	// Create request headers without Range header
+	requestHeaders := make(map[string]string)
+	for k, v := range headers {
+		requestHeaders[k] = v
+	}
+
+	// Connect and download
+	addr := fmt.Sprintf("%s:%d", host.IP, host.Port)
+	dialOptions := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+
+	client, err := dfdaemonclient.GetV2ByAddr(ctx, addr, dialOptions...)
+	if err != nil {
+		logger.Errorf("[distribute]: failed to connect to %s: %s", addr, err.Error())
+		return
+	}
+
+	downloadReq := &dfdaemonv2.DownloadTaskRequest{
+		Download: &commonv2.Download{
+			Url:           url,
+			PieceLength:   pieceLength,
+			Type:          commonv2.TaskType_STANDARD,
+			Priority:      commonv2.Priority_LEVEL0,
+			RequestHeader: requestHeaders,
+			Range:         blockRange,
+		},
+	}
+
+	stream, err := client.DownloadTask(ctx, taskID, downloadReq)
+	if err != nil {
+		logger.Errorf("[distribute]: failed to start download: %s", err.Error())
+		return
+	}
+
+	// Wait for completion
+	for {
+		_, err := stream.Recv()
+		if err != nil {
+			if err == io.EOF {
+				logger.Infof("[distribute]: download completed for block %d, peer %s, count: %d", event.BlockNumber, event.DownloadHost, count)
+				break
 			}
+			block.State = standard.BlockStateFailed
+			logger.Errorf("[distribute]: download failed for block %d, peer %s: %s, count: %d", event.BlockNumber, event.DownloadHost, err.Error(), count)
+			return
 		}
 	}
 
-	return false
+	if err := file.CompleteBlock(event.BlockNumber); err != nil {
+		logger.Errorf("[distribute]: failed to complete block %d for peer %s: %s, count: %d", event.BlockNumber, event.DownloadHost, err.Error(), count)
+	} else {
+		logger.Infof("[distribute]: file %s completed block %d for peer %s, count: %d", es.file.ID, event.BlockNumber, event.DownloadHost, count)
+	}
+
+	block.State = standard.BlockStateCompleted
+
+	es.releaseRate(event.DownloadHost, event.AllocatedDownloadRate, false)
+	es.releaseRate(event.UploadPeers[0], event.AllocatedUploadRate, true)
+
+	es.createUploadQueue()
 }
 
 // selectBlockForPeer selects the best block for a peer
 func (es *Distribute) selectBlockForPeer(hostID string) int32 {
 	host, exists := es.resource.HostManager().Load(hostID)
 	if !exists {
+		logger.Errorf("[distribute]: host %s not found for select block", hostID)
 		return -1
 	}
 
 	file, found := host.LoadFile(es.file.ID)
 	if !found {
+		logger.Errorf("[distribute]: file %s not found on host %s", es.file.ID, hostID)
 		return -1
 	}
 
 	missingBlocks := file.GetMissingBlocks()
 	if len(missingBlocks) == 0 {
+		logger.Infof("[distribute]: no missing blocks for host %s", hostID)
 		return -1
 	}
 
@@ -187,93 +255,6 @@ func (es *Distribute) selectBlockForPeer(hostID string) int32 {
 	return bestBlock
 }
 
-// downloadBlock executes the download
-func (es *Distribute) downloadBlock(ctx context.Context, event *standard.Event, taskID string, headers map[string]string, pieceLength *uint64, contentForCalculatingTaskId *string) {
-	host, exists := es.resource.HostManager().Load(event.DownloadPeer)
-	if !exists {
-		logger.Errorf("Host %s not found for download", event.DownloadPeer)
-		return
-	}
-
-	file, found := host.LoadFile(es.file.ID)
-	if !found {
-		logger.Errorf("File %s not found on host %s", es.file.ID, event.DownloadPeer)
-		return
-	}
-
-	// Assign block to peer in the file system
-	_, err := file.AssignBlockToPeer(event.BlockNumber, event.DownloadPeer)
-	if err != nil {
-		logger.Warnf("Failed to assign block %d to peer %s: %s", event.BlockNumber, event.DownloadPeer, err.Error())
-		return
-	}
-
-	// Get block information to create Range
-	block, exists := file.GetBlock(event.BlockNumber)
-	if !exists {
-		logger.Errorf("Block %d not found in file %s", event.BlockNumber, es.file.ID)
-		return
-	}
-
-	// Create commonv2.Range directly instead of HTTP header
-	blockRange := &commonv2.Range{
-		Start:  uint64(block.Offset),
-		Length: uint64(block.Length),
-	}
-
-	// Create request headers without Range header
-	requestHeaders := make(map[string]string)
-	for k, v := range headers {
-		requestHeaders[k] = v
-	}
-
-	// Connect and download
-	addr := fmt.Sprintf("%s:%d", host.IP, host.Port)
-	dialOptions := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
-
-	client, err := dfdaemonclient.GetV2ByAddr(ctx, addr, dialOptions...)
-	if err != nil {
-		logger.Errorf("Failed to connect to %s: %s", addr, err.Error())
-		return
-	}
-
-	downloadReq := &dfdaemonv2.DownloadTaskRequest{
-		Download: &commonv2.Download{
-			Url:           taskID,
-			PieceLength:   pieceLength,
-			Type:          commonv2.TaskType_STANDARD,
-			Priority:      commonv2.Priority_LEVEL0,
-			RequestHeader: requestHeaders,
-			Range:         blockRange,
-		},
-	}
-
-	stream, err := client.DownloadTask(ctx, taskID, downloadReq)
-	if err != nil {
-		logger.Errorf("Failed to start download: %s", err.Error())
-		return
-	}
-
-	// Wait for completion
-	for {
-		_, err := stream.Recv()
-		if err != nil {
-			if err == io.EOF {
-				logger.Infof("Download completed for block %d, peer %s", event.BlockNumber, event.DownloadPeer)
-				break
-			}
-			logger.Errorf("Download failed for block %d, peer %s: %s", event.BlockNumber, event.DownloadPeer, err.Error())
-			return
-		}
-	}
-
-	es.releaseRate(event.DownloadPeer, event.AllocatedDownloadRate, false)
-
-	// Update queues with proper locking
-	es.createDownloadQueue()
-	es.createUploadQueue()
-}
-
 // createUploadQueue creates the upload queue for the scheduler.
 func (es *Distribute) createUploadQueue() {
 	es.uploadQueueMu.Lock()
@@ -288,7 +269,7 @@ func (es *Distribute) createUploadQueue() {
 			if hostID, ok := key.(string); ok {
 				if host, ok := value.(*standard.Host); ok {
 					if file, found := host.LoadFile(es.file.ID); found {
-						if file.FinishedBlocks.Test(uint(i)) {
+						if file.FinishedBlocks.Test(uint(i)) && es.getHostIdleUploadRate(hostID) > es.rateLimit {
 							sources = append(sources, hostID)
 						}
 					}
@@ -311,7 +292,7 @@ func (es *Distribute) createUploadQueue() {
 }
 
 // createDownloadQueue creates the download queue for the scheduler.
-func (es *Distribute) createDownloadQueue() {
+func (es *Distribute) createDownloadQueue() int {
 	es.downloadQueueMu.Lock()
 	defer es.downloadQueueMu.Unlock()
 
@@ -321,9 +302,10 @@ func (es *Distribute) createDownloadQueue() {
 		if hostID, ok := key.(string); ok {
 			if host, ok := value.(*standard.Host); ok {
 				if file, found := host.LoadFile(es.file.ID); found {
-					missing := file.GetMissingBlockCount()
+					missing := file.GetMissingBlocks()
+					logger.Infof("[distribute]: host %s has %v missing blocks", hostID, missing)
 					// Check if host has missing blocks and sufficient download bandwidth
-					if missing > 0 && es.getHostIdleDownloadRate(hostID) > es.rateLimit {
+					if len(missing) > 0 && es.getHostIdleDownloadRate(hostID) > es.rateLimit {
 						es.downloadQueue = append(es.downloadQueue, hostID)
 					}
 				}
@@ -348,88 +330,19 @@ func (es *Distribute) createDownloadQueue() {
 			return false
 		}
 
-		missingI := fileI.GetMissingBlockCount()
-		missingJ := fileJ.GetMissingBlockCount()
+		missingI := len(fileI.GetMissingBlocks())
+		missingJ := len(fileJ.GetMissingBlocks())
 
 		return missingI > missingJ
 	})
 
-	logger.Infof("Initialized download queue with %d peers", len(es.downloadQueue))
-}
+	logger.Infof("[distribute]: create download queue with %d peers", len(es.downloadQueue))
 
-// canScheduleDownload checks if a host can be scheduled for download.
-func (es *Distribute) canScheduleDownload(hostID string) bool {
-	return es.getHostIdleDownloadRate(hostID) > es.rateLimit
-}
-
-// isDistributionFinished checks if the distribution is finished.
-func (es *Distribute) isDistributionFinished() bool {
-	finished := true
-	es.resource.HostManager().Range(func(key, value any) bool {
-		if host, ok := value.(*standard.Host); ok {
-			if file, found := host.LoadFile(es.file.ID); found {
-				if !file.IsFinished() {
-					finished = false
-					return false
-				}
-			}
-		}
-		return true
-	})
-	return finished
-}
-
-// getHostIdleUploadRate gets the idle upload rate for a host.
-func (es *Distribute) getHostIdleUploadRate(hostID string) uint64 {
-	host, exists := es.resource.HostManager().Load(hostID)
-	if !exists {
-		return 0
-	}
-	idle := host.Network.UploadRateLimit - host.Network.AllocatedUploadRate
-	if idle < 0 {
-		return 0
-	}
-	return idle
-}
-
-// getHostIdleDownloadRate gets the idle download rate for a host.
-func (es *Distribute) getHostIdleDownloadRate(hostID string) uint64 {
-	host, exists := es.resource.HostManager().Load(hostID)
-	if !exists {
-		return 0
-	}
-	idle := host.Network.DownloadRateLimit - host.Network.AllocatedDownloadRate
-	if idle < 0 {
-		return 0
-	}
-	return idle
-}
-
-// allocateRate allocates the rate for a host.
-func (es *Distribute) allocateRate(hostID string, rate uint64, isUpload bool) {
-	host, exists := es.resource.HostManager().Load(hostID)
-	if !exists {
-		return
-	}
-
-	host.AllocateRate(rate, isUpload)
-}
-
-// releaseRate releases the rate for a host.
-func (es *Distribute) releaseRate(hostID string, rate uint64, isUpload bool) {
-	host, exists := es.resource.HostManager().Load(hostID)
-	if !exists {
-		return
-	}
-
-	host.ReleaseRate(rate, isUpload)
+	return len(es.downloadQueue)
 }
 
 // createEvent creates a new event
 func (es *Distribute) createEvent(id string, blockNumber int32, taskID string, hostID string) *standard.Event {
-	es.uploadQueueMu.RLock()
-	defer es.uploadQueueMu.RUnlock()
-
 	parents, exists := es.uploadQueue[blockNumber]
 	if !exists || len(parents) == 0 {
 		return nil
@@ -464,6 +377,7 @@ func (es *Distribute) createEvent(id string, blockNumber int32, taskID string, h
 	if !exists {
 		return nil
 	}
+
 	block.ParentID = parentBlock.PeerID
 
 	idleUploadRate := es.getHostIdleUploadRate(parentID)
@@ -477,12 +391,88 @@ func (es *Distribute) createEvent(id string, blockNumber int32, taskID string, h
 		allocatedRate = idleUploadRate
 	}
 
+	logger.Infof("[distribute]: allocated rate %d for parent %s and host %s", allocatedRate, parentID, hostID)
+
 	es.allocateRate(parentID, allocatedRate, true)
 	es.allocateRate(hostID, allocatedRate, false)
 
-	es.createUploadQueue()
+	block.State = standard.BlockStateDownload
+	logger.Infof("[distribute]: block %d for host %s is in download state: %v", blockNumber, hostID, block)
+	missingBlocks := file.GetMissingBlocks()
+	logger.Infof("[distribute]: missing blocks: %v", missingBlocks)
 
 	return standard.NewEvent(id, blockNumber, taskID, hostID, parentID, allocatedRate, allocatedRate)
+}
+
+// canScheduleDownload checks if a host can be scheduled for download.
+func (es *Distribute) canScheduleDownload(hostID string) bool {
+	logger.Infof("[distribute]: host %s idle download rate: %d, rate limit: %d", hostID, es.getHostIdleDownloadRate(hostID), es.rateLimit)
+	return es.getHostIdleDownloadRate(hostID) > es.rateLimit
+}
+
+// isDistributionFinished checks if the distribution is finished.
+func (es *Distribute) isDistributionFinished() bool {
+	finished := true
+	es.resource.HostManager().Range(func(key, value any) bool {
+		if host, ok := value.(*standard.Host); ok {
+			if file, found := host.LoadFile(es.file.ID); found {
+				if !file.IsFinished() {
+					finished = false
+					logger.Infof("[distribute]: file %s in host %s is not finished", es.file.ID, key)
+				}
+			}
+		}
+		return true
+	})
+	return finished
+}
+
+// getHostIdleUploadRate gets the idle upload rate for a host.
+func (es *Distribute) getHostIdleUploadRate(hostID string) uint64 {
+	host, exists := es.resource.HostManager().Load(hostID)
+	if !exists {
+		return 0
+	}
+
+	occupied := host.Network.UploadRate
+	if host.Network.UploadRate < host.Network.AllocatedUploadRate {
+		occupied = host.Network.AllocatedUploadRate
+	}
+	return host.Network.UploadRateLimit - occupied
+}
+
+// getHostIdleDownloadRate gets the idle download rate for a host.
+func (es *Distribute) getHostIdleDownloadRate(hostID string) uint64 {
+	host, exists := es.resource.HostManager().Load(hostID)
+	if !exists {
+		return 0
+	}
+
+	occupied := host.Network.DownloadRate
+	if host.Network.DownloadRate < host.Network.AllocatedDownloadRate {
+		occupied = host.Network.AllocatedDownloadRate
+	}
+	return host.Network.DownloadRateLimit - occupied
+}
+
+// allocateRate allocates the rate for a host.
+func (es *Distribute) allocateRate(hostID string, rate uint64, isUpload bool) {
+	host, exists := es.resource.HostManager().Load(hostID)
+	if !exists {
+		return
+	}
+
+	host.AllocateRate(rate, isUpload)
+}
+
+// releaseRate releases the rate for a host.
+func (es *Distribute) releaseRate(hostID string, rate uint64, isUpload bool) {
+	host, exists := es.resource.HostManager().Load(hostID)
+	if !exists {
+		return
+	}
+
+	host.ReleaseRate(rate, isUpload)
 }
 
 func (es *Distribute) LoadEvent(id string) *standard.Event {

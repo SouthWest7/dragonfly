@@ -21,6 +21,16 @@ import (
 	"time"
 )
 
+// BlockState is the state of a block
+type BlockState string
+
+const (
+	BlockStatePending   BlockState = "pending"
+	BlockStateDownload  BlockState = "download"
+	BlockStateCompleted BlockState = "completed"
+	BlockStateFailed    BlockState = "failed"
+)
+
 // Block represents a file block with its metadata
 type Block struct {
 	// Number is the block number/id
@@ -44,14 +54,14 @@ type Block struct {
 	// ParentID is the parent id that is uploading this block
 	ParentID string
 
-	// Finished indicates if this block has been downloaded (cached status)
-	Finished bool
-
 	// CreatedAt is the time when block was created
 	CreatedAt time.Time
 
 	// UpdatedAt is the time when block was last updated
 	UpdatedAt time.Time
+
+	// State is the state of the block
+	State BlockState
 }
 
 // NewBlock creates a new block instance
@@ -61,9 +71,9 @@ func NewBlock(number int32, offset, length uint, taskID string) *Block {
 		Offset:    offset,
 		Length:    length,
 		TaskID:    taskID,
-		Finished:  false,
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
+		State:     BlockStatePending,
 	}
 }
 
@@ -78,6 +88,10 @@ func (b *Block) GetEndOffset() uint {
 	return b.Offset + b.Length - 1
 }
 
+func (b *Block) GetPeerID() string {
+	return b.PeerID
+}
+
 // AssignToPeer assigns this block to a specific peer
 func (b *Block) AssignToPeer(peerID string) {
 	b.PeerID = peerID
@@ -87,6 +101,6 @@ func (b *Block) AssignToPeer(peerID string) {
 // Reset resets the block state (removes peer assignment and completion status)
 func (b *Block) Reset() {
 	b.PeerID = ""
-	b.Finished = false
+	b.State = BlockStatePending
 	b.UpdatedAt = time.Now()
 }

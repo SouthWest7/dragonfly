@@ -173,6 +173,12 @@ func (t *Job) GetGroupJobState(name string, groupID string) (*GroupJobState, err
 					return nil, err
 				}
 				results = append(results, resp)
+			case DistributeJob:
+				var resp DistributeResponse
+				if err := UnmarshalTaskResult(result.Value, &resp); err != nil {
+					return nil, err
+				}
+				results = append(results, resp)
 			default:
 				return nil, errors.New("unsupported unmarshal task result")
 			}

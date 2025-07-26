@@ -20,8 +20,8 @@ import (
 	"fmt"
 	"math"
 	"sync"
-	"time"
 
+	logger "d7y.io/dragonfly/v2/internal/dflog"
 	"d7y.io/dragonfly/v2/pkg/container/set"
 	nethttp "d7y.io/dragonfly/v2/pkg/net/http"
 	"github.com/bits-and-blooms/bitset"
@@ -59,12 +59,6 @@ type File struct {
 	// Host is the host that owns this file (needed to access peer states)
 	Host *Host
 
-	// CreatedAt is the time when file was created.
-	CreatedAt time.Time
-
-	// UpdatedAt is the time when file was last updated.
-	UpdatedAt time.Time
-
 	// Mutex for thread safety.
 	mutex sync.RWMutex
 }
@@ -83,30 +77,33 @@ func NewFile(id, taskID, url string, contentLength uint, blockLength uint) *File
 		FinishedBlocks: &bitset.BitSet{},
 		ActivePeers:    set.NewSafeSet[string](),
 		Host:           nil, // Will be set when file is stored to host
-		CreatedAt:      time.Now(),
-		UpdatedAt:      time.Now(),
 	}
 }
 
 // AssignBlockToPeer
 func AssignBlockToPeer(task *Task, host *Host, peer *Peer) error {
+	logger.Infof("[distribute]: assigning block to peer %s", peer.ID)
+
 	if peer.Range == nil {
+		logger.Warnf("[distribute]: peer %s has no range", peer.ID)
 		return nil
 	}
 
 	file_id := task.ID
 	file, ok := host.LoadFile(file_id)
 	if !ok {
+		logger.Warnf("[distribute]: file %s not found", file_id)
 		return fmt.Errorf("file %s not found", file_id)
 	}
 
 	blockNumber := file.CalculateBlockNumber(peer.Range)
 	if blockNumber == -1 {
+		logger.Warnf("[distribute]: block number is -1")
 		return nil
 	}
 
 	if _, err := file.AssignBlockToPeer(blockNumber, peer.ID); err != nil {
-		peer.Log.Warnf("failed to assign block %d to peer %s: %v", blockNumber, peer.ID, err)
+		logger.Warnf("[distribute]: failed to assign block %d to peer %s: %v", blockNumber, peer.ID, err)
 		return err
 	}
 
@@ -114,6 +111,8 @@ func AssignBlockToPeer(task *Task, host *Host, peer *Peer) error {
 	if block != nil {
 		peer.AllocatedParents.Add(block.ParentID)
 	}
+
+	logger.Infof("[distribute]: assigned block %d to peer %s", blockNumber, peer.ID)
 
 	return nil
 }
@@ -133,7 +132,6 @@ func (f *File) CreateBlocks() {
 			block := NewBlock(int32(i), offset, length, f.TaskID)
 			f.Blocks.Store(int32(i), block)
 		}
-		f.updateTimestamp()
 	})
 }
 
@@ -169,11 +167,6 @@ func (f *File) getBlockWithValidation(blockNumber int32) (*Block, error) {
 	return block, nil
 }
 
-// updateTimestamp 更新时间戳
-func (f *File) updateTimestamp() {
-	f.UpdatedAt = time.Now()
-}
-
 // collectBlocks 通用的块收集函数
 func (f *File) collectBlocks(filterFn func(*Block) bool) []*Block {
 	var blocks []*Block
@@ -207,21 +200,20 @@ func (f *File) AssignBlockToPeer(blockNumber int32, peerID string) (*Block, erro
 			return
 		}
 
-		if block.PeerID != "" && block.PeerID != peerID {
-			err = fmt.Errorf("block %d already assigned to peer %s", blockNumber, block.PeerID)
+		if block.GetPeerID() != "" && block.GetPeerID() != peerID {
+			err = fmt.Errorf("block %d already assigned to peer %s", blockNumber, block.GetPeerID())
 			return
 		}
 
 		block.AssignToPeer(peerID)
 		f.ActivePeers.Add(peerID)
-		f.updateTimestamp()
 	})
 
 	return block, err
 }
 
 // CompleteBlock marks a block as completed
-func (f *File) CompleteBlock(blockNumber int32, peerID string) error {
+func (f *File) CompleteBlock(blockNumber int32) error {
 	var err error
 
 	f.withWriteLock(func() {
@@ -231,13 +223,8 @@ func (f *File) CompleteBlock(blockNumber int32, peerID string) error {
 			return
 		}
 
-		if block.PeerID != peerID {
-			err = fmt.Errorf("block %d not assigned to peer %s", blockNumber, peerID)
-			return
-		}
-
+		block.State = BlockStateCompleted
 		f.FinishedBlocks.Set(uint(blockNumber))
-		f.updateTimestamp()
 	})
 
 	return err
@@ -248,38 +235,53 @@ func (f *File) GetMissingBlocks() []int32 {
 	var missing []int32
 
 	for i := int32(0); i < int32(f.TotalBlocks); i++ {
-		if !f.IsBlockFinished(i) {
-			missing = append(missing, i)
+		block, exists := f.GetBlock(i)
+		if !exists {
+			continue
 		}
+		if block.State == BlockStateCompleted || block.State == BlockStateDownload {
+			continue
+		}
+
+		if f.Host != nil {
+			if peer, loaded := f.Host.LoadPeer(block.GetPeerID()); loaded {
+				if peer.FSM.Is(PeerStateSucceeded) {
+					// Update the cached status with proper write lock
+					f.withWriteLock(func() {
+						block.State = BlockStateCompleted
+						f.FinishedBlocks.Set(uint(i))
+					})
+					continue
+				}
+			}
+		}
+		missing = append(missing, i)
 	}
 
 	return missing
 }
 
-// GetMissingBlockCount returns the number of missing blocks
-func (f *File) GetMissingBlockCount() int32 {
-	return int32(f.TotalBlocks) - int32(f.FinishedBlocks.Count())
-}
-
 // IsBlockFinished checks if a block is completed using cached status and peer state
 func (f *File) IsBlockFinished(blockNumber int32) bool {
 	block, exists := f.GetBlock(blockNumber)
-	if !exists || block.PeerID == "" {
+	if !exists || block.GetPeerID() == "" {
 		return false
 	}
 
 	// Fast path: if block is already marked as completed, return true
-	if block.Finished {
+	if block.State == BlockStateCompleted {
 		return true
 	}
 
 	// Slow path: check peer state only if block is not completed
 	if f.Host != nil {
-		if peer, loaded := f.Host.LoadPeer(block.PeerID); loaded {
+		if peer, loaded := f.Host.LoadPeer(block.GetPeerID()); loaded {
 			if peer.FSM.Is(PeerStateSucceeded) {
-				// Update the cached status
-				block.Finished = true
-				f.FinishedBlocks.Set(uint(blockNumber))
+				// Update the cached status with proper write lock
+				f.withWriteLock(func() {
+					block.State = BlockStateCompleted
+					f.FinishedBlocks.Set(uint(blockNumber))
+				})
 				return true
 			}
 		}
@@ -288,15 +290,23 @@ func (f *File) IsBlockFinished(blockNumber int32) bool {
 	return false
 }
 
+func (f *File) IsBlockDownloading(blockNumber int32) bool {
+	block, exists := f.GetBlock(blockNumber)
+	if !exists || block.GetPeerID() == "" {
+		return false
+	}
+	return block.State == BlockStateDownload
+}
+
 // IsBlockAssigned checks if a block is being downloaded by a specific peer
 func (f *File) IsBlockAssigned(blockNumber int32, peerID string) bool {
 	block, exists := f.GetBlock(blockNumber)
-	if !exists || block.PeerID != peerID {
+	if !exists || block.GetPeerID() != peerID {
 		return false
 	}
 
 	if f.Host != nil {
-		if peer, loaded := f.Host.LoadPeer(block.PeerID); loaded {
+		if peer, loaded := f.Host.LoadPeer(block.GetPeerID()); loaded {
 			if !peer.FSM.Is(PeerStateSucceeded) {
 				return true
 			}
@@ -309,7 +319,7 @@ func (f *File) IsBlockAssigned(blockNumber int32, peerID string) bool {
 // GetBlocksByPeer returns all blocks assigned to a specific peer
 func (f *File) GetBlocksByPeer(peerID string) []*Block {
 	return f.collectBlocks(func(block *Block) bool {
-		return block.PeerID == peerID
+		return block.GetPeerID() == peerID
 	})
 }
 
@@ -339,13 +349,12 @@ func (f *File) GetCompletionRatio() float64 {
 func (f *File) RemovePeer(peerID string) {
 	f.withWriteLock(func() {
 		f.forEachBlock(func(block *Block) {
-			if block.PeerID == peerID {
+			if block.GetPeerID() == peerID {
 				block.PeerID = ""
 				f.FinishedBlocks.Clear(uint(block.Number))
 			}
 		})
 		f.ActivePeers.Delete(peerID)
-		f.updateTimestamp()
 	})
 }
 

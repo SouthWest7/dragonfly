@@ -31,8 +31,8 @@ type Event struct {
 	// TaskID is the ID of the task.
 	TaskID string
 
-	// DownloadPeer is the peer that will download the block.
-	DownloadPeer string
+	// DownloadHost is the peer that will download the block.
+	DownloadHost string
 
 	// UploadPeers is the list of peers that will upload the block.
 	UploadPeers []string
@@ -50,7 +50,7 @@ func NewEvent(id string, blockNumber int32, taskID string, hostID string, parent
 		ID:                    id,
 		BlockNumber:           blockNumber,
 		TaskID:                taskID,
-		DownloadPeer:          hostID,
+		DownloadHost:          hostID,
 		UploadPeers:           []string{parentID},
 		AllocatedUploadRate:   allocatedUploadRate,
 		AllocatedDownloadRate: allocatedDownloadRate,
