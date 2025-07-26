@@ -862,7 +862,6 @@ func (j *job) distribute(ctx context.Context, data string) (string, error) {
 	fileID := taskID
 
 	log := logger.WithTask(taskID, req.URL)
-	log.Infof("[distribute]: starting distribute for %s", req.URL)
 
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute) // 30 minutes timeout
 	defer cancel()
@@ -913,7 +912,6 @@ func (j *job) distribute(ctx context.Context, data string) (string, error) {
 		// Update host ID from response
 		hostID = resp.HostId
 		peerID = resp.PeerId
-		log.Debugf("[distribute]: received download response from host %s", hostID)
 	}
 
 	// Get task to retrieve actual content length
@@ -929,11 +927,21 @@ func (j *job) distribute(ctx context.Context, data string) (string, error) {
 		blockLength = uint(*req.BlockLength)
 	}
 
+	// Set default rate limit if not specified, default 1MB.
+	rateLimit := uint64(1 * 1024 * 1024)
+	if req.RateLimit != nil {
+		rateLimit = *req.RateLimit
+	}
+
+	// Set default schedule interval if not specified, default 1 milliseconds.
+	scheduleInterval := uint64(1)
+	if req.ScheduleInterval != nil {
+		scheduleInterval = *req.ScheduleInterval
+	}
+
 	// Create scheduler-maintained file (global file)
 	schedulerFile := resource.NewFile(taskID, taskID, req.URL, contentLength, blockLength)
 	schedulerFile.CreateBlocks()
-	log.Infof("[distribute]: created scheduler file %s with %d blocks, block length: %d",
-		taskID, schedulerFile.TotalBlocks, blockLength)
 
 	// Create and distribute file instances to all hosts
 	var availableHosts []string
@@ -946,7 +954,6 @@ func (j *job) distribute(ctx context.Context, data string) (string, error) {
 			// Store file to the host
 			host.StoreFile(hostFile)
 			availableHosts = append(availableHosts, host.ID)
-			log.Infof("[distribute]: created and stored file %s to host %s", taskID, host.ID)
 		}
 		return true
 	})
@@ -967,11 +974,10 @@ func (j *job) distribute(ctx context.Context, data string) (string, error) {
 					log.Warnf("[distribute]: failed to complete block %d for seed peer %s: %s", i, hostID, err.Error())
 				}
 			}
-			log.Infof("[distribute]: assigned and marked all blocks as completed for seed peer %s", hostID)
 		}
 	}
 
-	distribute := NewDistribute(j.resource, schedulerFile, req.RateLimit)
+	distribute := NewDistribute(j.resource, schedulerFile, &rateLimit, &scheduleInterval)
 
 	// Start file distribution to all hosts
 	log.Infof("[distribute]: starting file distribution to %d hosts", len(availableHosts))

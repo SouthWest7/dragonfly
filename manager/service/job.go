@@ -185,6 +185,16 @@ func (s *service) CreateDistributeJob(ctx context.Context, json types.CreateDist
 		*json.Args.BlockLength = 4194304
 	}
 
+	if json.Args.RateLimit == nil {
+		json.Args.RateLimit = new(uint64)
+		*json.Args.RateLimit = 1048576
+	}
+
+	if json.Args.ScheduleInterval == nil {
+		json.Args.ScheduleInterval = new(uint64)
+		*json.Args.ScheduleInterval = 1
+	}
+
 	args, err := structure.StructToMap(json.Args)
 	if err != nil {
 		logger.Errorf("convert distribute args to map failed: %w", err)

@@ -82,8 +82,6 @@ func NewFile(id, taskID, url string, contentLength uint, blockLength uint) *File
 
 // AssignBlockToPeer
 func AssignBlockToPeer(task *Task, host *Host, peer *Peer) error {
-	logger.Infof("[distribute]: assigning block to peer %s", peer.ID)
-
 	if peer.Range == nil {
 		logger.Warnf("[distribute]: peer %s has no range", peer.ID)
 		return nil

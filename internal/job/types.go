@@ -124,7 +124,10 @@ type DistributeRequest struct {
 	BlockLength *uint64 `json:"block_length" validate:"omitempty,gte=4194304"`
 
 	// RateLimit is the rate limit for the distribute.
-	RateLimit *uint64 `json:"rate_limit" validate:"omitempty,gte=1024"`
+	RateLimit *uint64 `json:"rate_limit" validate:"omitempty,gte=1048576"`
+
+	// ScheduleInterval is the schedule interval for the distribute.
+	ScheduleInterval *uint64 `json:"schedule_interval" validate:"omitempty,gte=1"`
 
 	// Tag is the tag for distribute.
 	Tag string `json:"tag" validate:"omitempty"`

@@ -14,7 +14,7 @@ RUN yarn build
 
 FROM golang:1.23.8-alpine3.20 AS server-builder
 
-ARG GOPROXY=
+ARG GOPROXY
 ARG GOTAGS
 ARG GOGCFLAGS
 
