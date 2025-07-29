@@ -141,8 +141,9 @@ func (v *V2) AnnouncePeer(stream schedulerv2.Scheduler_AnnouncePeerServer) error
 				return err
 			}
 		case *schedulerv2.AnnouncePeerRequest_DownloadPeerBackToSourceStartedRequest:
+			downloadPeerBackToSourceStartedRequest := announcePeerRequest.DownloadPeerBackToSourceStartedRequest
 			log.Info("receive DownloadPeerBackToSourceStartedRequest")
-			if err := v.handleDownloadPeerBackToSourceStartedRequest(ctx, req.GetPeerId()); err != nil {
+			if err := v.handleDownloadPeerBackToSourceStartedRequest(ctx, req.GetPeerId(), downloadPeerBackToSourceStartedRequest); err != nil {
 				log.Error(err)
 
 				// If the peer started back-to-source failed, and set the peer state to failed. Peer will not need to report
@@ -1212,10 +1213,16 @@ func (v *V2) handleDownloadPeerStartedRequest(ctx context.Context, peerID string
 }
 
 // handleDownloadPeerBackToSourceStartedRequest handles DownloadPeerBackToSourceStartedRequest of AnnouncePeerRequest.
-func (v *V2) handleDownloadPeerBackToSourceStartedRequest(ctx context.Context, peerID string) error {
+func (v *V2) handleDownloadPeerBackToSourceStartedRequest(ctx context.Context, peerID string, req *schedulerv2.DownloadPeerBackToSourceStartedRequest) error {
 	peer, loaded := v.resource.PeerManager().Load(peerID)
+	contentLength := req.GetContentLength()
 	if !loaded {
 		return status.Errorf(codes.NotFound, "peer %s not found", peerID)
+	}
+
+	if contentLength > 0 {
+		logger.WithPeerID(peerID).Infof("[distributed] peer %s back to source with content length %d", peerID, contentLength)
+		peer.Task.ContentLength.Store(int64(contentLength))
 	}
 
 	// Collect DownloadPeerBackToSourceStartedCount metrics.
@@ -1559,6 +1566,7 @@ func (v *V2) handleResource(_ context.Context, stream schedulerv2.Scheduler_Anno
 		task = standard.NewTask(taskID, download.GetUrl(), download.GetTag(), download.GetApplication(), download.GetType(),
 			download.GetFilteredQueryParams(), download.GetRequestHeader(), int32(v.config.Scheduler.BackToSourceCount), options...)
 		v.resource.TaskManager().Store(task)
+		logger.WithTaskID(taskID).Infof("[distributed] new task %s with url %s", taskID, download.GetUrl())
 	} else {
 		task.URL = download.GetUrl()
 		task.FilteredQueryParams = download.GetFilteredQueryParams()

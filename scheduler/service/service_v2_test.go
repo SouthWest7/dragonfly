@@ -2025,7 +2025,7 @@ func TestServiceV2_handleDownloadPeerBackToSourceStartedRequest(t *testing.T) {
 				)
 
 				assert := assert.New(t)
-				assert.ErrorIs(svc.handleDownloadPeerBackToSourceStartedRequest(context.Background(), peer.ID), status.Errorf(codes.NotFound, "peer %s not found", peer.ID))
+				assert.ErrorIs(svc.handleDownloadPeerBackToSourceStartedRequest(context.Background(), peer.ID, nil), status.Errorf(codes.NotFound, "peer %s not found", peer.ID))
 			},
 		},
 		{
@@ -2040,7 +2040,7 @@ func TestServiceV2_handleDownloadPeerBackToSourceStartedRequest(t *testing.T) {
 				peer.FSM.SetState(standard.PeerStateBackToSource)
 
 				assert := assert.New(t)
-				assert.ErrorIs(svc.handleDownloadPeerBackToSourceStartedRequest(context.Background(), peer.ID), status.Error(codes.Internal, "event DownloadBackToSource inappropriate in current state BackToSource"))
+				assert.ErrorIs(svc.handleDownloadPeerBackToSourceStartedRequest(context.Background(), peer.ID, nil), status.Error(codes.Internal, "event DownloadBackToSource inappropriate in current state BackToSource"))
 			},
 		},
 		{
@@ -2056,7 +2056,7 @@ func TestServiceV2_handleDownloadPeerBackToSourceStartedRequest(t *testing.T) {
 				peer.Task.FSM.SetState(standard.TaskStateRunning)
 
 				assert := assert.New(t)
-				assert.NoError(svc.handleDownloadPeerBackToSourceStartedRequest(context.Background(), peer.ID))
+				assert.NoError(svc.handleDownloadPeerBackToSourceStartedRequest(context.Background(), peer.ID, nil))
 				assert.NotEqual(peer.UpdatedAt.Load(), 0)
 				assert.NotEqual(peer.Task.UpdatedAt.Load(), 0)
 			},
@@ -2074,7 +2074,7 @@ func TestServiceV2_handleDownloadPeerBackToSourceStartedRequest(t *testing.T) {
 				peer.Task.FSM.SetState(standard.TaskStatePending)
 
 				assert := assert.New(t)
-				assert.NoError(svc.handleDownloadPeerBackToSourceStartedRequest(context.Background(), peer.ID))
+				assert.NoError(svc.handleDownloadPeerBackToSourceStartedRequest(context.Background(), peer.ID, nil))
 				assert.NotEqual(peer.UpdatedAt.Load(), 0)
 				assert.NotEqual(peer.Task.UpdatedAt.Load(), 0)
 			},

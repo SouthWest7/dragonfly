@@ -863,9 +863,6 @@ func (j *job) distribute(ctx context.Context, data string) (string, error) {
 
 	log := logger.WithTask(taskID, req.URL)
 
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute) // 30 minutes timeout
-	defer cancel()
-
 	// If seed peer is disabled, return error.
 	if !j.config.SeedPeer.Enable {
 		return "", fmt.Errorf("[distribute]: cluster %d scheduler %s has disabled seed peer", j.config.Manager.SchedulerClusterID, j.config.Server.AdvertiseIP)
@@ -887,68 +884,78 @@ func (j *job) distribute(ctx context.Context, data string) (string, error) {
 		},
 	}
 
-	// Send download task to seed peer
-	stream, err := j.resource.SeedPeer().Client().DownloadTask(ctx, taskID, downloadReq)
-	if err != nil {
-		log.Errorf("[distribute]: create download task failed: %s", err.Error())
-		return "", err
-	}
-
-	// Wait for the download task to complete
 	var hostID string
 	var peerID string
-	for {
-		resp, err := stream.Recv()
-		if err != nil {
-			if err == io.EOF {
-				log.Info("[distribute]: download task completed successfully")
-				break
-			}
+	// Start download task in goroutine
+	go func() {
+		log.Info("[distribute]: download task started")
 
-			log.Errorf("[distribute]: receive download response failed: %s", err.Error())
-			return "", err
+		// Send download task to seed peer
+		stream, err := j.resource.SeedPeer().Client().DownloadTask(ctx, taskID, downloadReq)
+		if err != nil {
+			log.Errorf("[distribute]: create download task failed: %s", err.Error())
+			return
 		}
 
-		// Update host ID from response
-		hostID = resp.HostId
-		peerID = resp.PeerId
-	}
+		// Wait for the download task to complete.
+		for {
+			resp, err := stream.Recv()
+			if err != nil {
+				if err == io.EOF {
+					log.Info("[distribute]: download task completed successfully")
+					break
+				}
+
+				log.Errorf("[distribute]: receive download response failed: %s", err.Error())
+				return
+			}
+
+			hostID = resp.HostId
+			peerID = resp.PeerId
+		}
+	}()
 
 	// Get task to retrieve actual content length
-	task, ok := j.resource.TaskManager().Load(taskID)
-	var contentLength uint
-	if ok {
-		contentLength = uint(task.ContentLength.Load())
+	pieceLength := uint(*req.PieceLength)
+	var contentLength int64
+	for {
+		task, ok := j.resource.TaskManager().Load(taskID)
+		if ok {
+			contentLength = task.ContentLength.Load()
+			if contentLength == -1 {
+				log.Warnf("[distribute]: task %s content length is 0, retry", taskID)
+				continue
+			}
+
+			log.Infof("[distribute]: loaded task %s, content length: %d", taskID, contentLength)
+			break
+		}
+		time.Sleep(1 * time.Second)
 	}
 
 	// Set default block length if not specified, default 4MB.
-	blockLength := uint(4 * 1024 * 1024)
-	if req.BlockLength != nil {
-		blockLength = uint(*req.BlockLength)
-	}
+	blockLength := uint64(*req.BlockLength)
 
 	// Set default rate limit if not specified, default 1MB.
-	rateLimit := uint64(1 * 1024 * 1024)
-	if req.RateLimit != nil {
-		rateLimit = *req.RateLimit
-	}
+	rateLimit := uint64(*req.RateLimit)
 
 	// Set default schedule interval if not specified, default 1 milliseconds.
-	scheduleInterval := uint64(1)
-	if req.ScheduleInterval != nil {
-		scheduleInterval = *req.ScheduleInterval
-	}
+	scheduleInterval := uint64(*req.ScheduleInterval)
 
 	// Create scheduler-maintained file (global file)
-	schedulerFile := resource.NewFile(taskID, taskID, req.URL, contentLength, blockLength)
+	schedulerFile := resource.NewFile(taskID, taskID, req.URL, pieceLength, contentLength, blockLength)
 	schedulerFile.CreateBlocks()
 
 	// Create and distribute file instances to all hosts
 	var availableHosts []string
 	j.resource.HostManager().Range(func(key, value any) bool {
 		if host, ok := value.(*resource.Host); ok {
+			if _, ok := host.LoadFile(taskID); ok {
+				return true
+			}
+
 			// Create independent file for each host
-			hostFile := resource.NewFile(taskID, taskID, req.URL, contentLength, blockLength)
+			hostFile := resource.NewFile(taskID, taskID, req.URL, pieceLength, contentLength, blockLength)
 			hostFile.CreateBlocks()
 
 			// Store file to the host
@@ -958,26 +965,32 @@ func (j *job) distribute(ctx context.Context, data string) (string, error) {
 		return true
 	})
 
-	// Mark blocks as completed for the seed peer that downloaded the file
-	if seedHost, ok := j.resource.HostManager().Load(hostID); ok {
-		if seedFile, found := seedHost.LoadFile(taskID); found {
-			// Assign and mark all blocks as completed for the seed peer
-			for i := int32(0); i < int32(seedFile.TotalBlocks); i++ {
-				// First assign the block to the peer
-				if _, err := seedFile.AssignBlockToPeer(i, peerID); err != nil {
-					log.Warnf("[distribute]: failed to assign block %d to seed peer %s: %s", i, peerID, err.Error())
-					continue
-				}
+	go func() {
+		for {
+			if host, ok := j.resource.HostManager().Load(hostID); ok {
+				if file, ok := host.LoadFile(taskID); ok {
+					if !file.IsFinished() {
+						for i := int32(0); i < int32(file.TotalBlocks); i++ {
+							if file.FinishedBlocks.Test(uint(i)) {
+								continue
+							}
 
-				// Then mark it as completed
-				if err := seedFile.CompleteBlock(i); err != nil {
-					log.Warnf("[distribute]: failed to complete block %d for seed peer %s: %s", i, hostID, err.Error())
+							if _, err := file.AssignBlockToPeer(i, peerID); err != nil {
+								log.Warnf("[distribute]: failed to assign block %d to seed peer %s: %s", i, peerID, err.Error())
+								continue
+							}
+
+							if err := file.FinishBlockBackToSource(i); err != nil {
+								log.Warnf("[distribute]: failed to complete block %d for seed peer %s: %s", i, peerID, err.Error())
+							}
+						}
+					}
 				}
 			}
 		}
-	}
+	}()
 
-	distribute := NewDistribute(j.resource, schedulerFile, &rateLimit, &scheduleInterval)
+	distribute := NewDistribute(j.resource, schedulerFile, rateLimit, scheduleInterval)
 
 	// Start file distribution to all hosts
 	log.Infof("[distribute]: starting file distribution to %d hosts", len(availableHosts))

@@ -38,14 +38,17 @@ type File struct {
 	// URL is file url.
 	URL string
 
+	// PieceLength is the length of pieces in this file
+	PieceLength uint
+
 	// ContentLength is file content length.
-	ContentLength uint
+	ContentLength int64
 
 	// TotalBlocks is total blocks.
 	TotalBlocks uint
 
 	// BlockLength is default block length.
-	BlockLength uint
+	BlockLength uint64
 
 	// Blocks maps block number to Block.
 	Blocks *sync.Map
@@ -64,12 +67,13 @@ type File struct {
 }
 
 // NewFile creates a new file instance
-func NewFile(id, taskID, url string, contentLength uint, blockLength uint) *File {
+func NewFile(id, taskID, url string, pieceLength uint, contentLength int64, blockLength uint64) *File {
 	totalBlocks := uint(math.Ceil(float64(contentLength) / float64(blockLength)))
 	return &File{
 		ID:             id,
 		TaskID:         taskID,
 		URL:            url,
+		PieceLength:    pieceLength,
 		ContentLength:  contentLength,
 		TotalBlocks:    totalBlocks,
 		BlockLength:    blockLength,
@@ -119,15 +123,15 @@ func AssignBlockToPeer(task *Task, host *Host, peer *Peer) error {
 func (f *File) CreateBlocks() {
 	f.withWriteLock(func() {
 		for i := uint(0); i < f.TotalBlocks; i++ {
-			offset := uint(i) * f.BlockLength
+			offset := uint64(i) * f.BlockLength
 			length := f.BlockLength
 
 			// Adjust length for the last block
-			if offset+length > f.ContentLength {
-				length = f.ContentLength - offset
+			if offset+length > uint64(f.ContentLength) {
+				length = uint64(f.ContentLength) - offset
 			}
 
-			block := NewBlock(int32(i), offset, length, f.TaskID)
+			block := NewBlock(int32(i), offset, length, f.TaskID, f.PieceLength)
 			f.Blocks.Store(int32(i), block)
 		}
 	})
@@ -210,8 +214,8 @@ func (f *File) AssignBlockToPeer(blockNumber int32, peerID string) (*Block, erro
 	return block, err
 }
 
-// CompleteBlock marks a block as completed
-func (f *File) CompleteBlock(blockNumber int32) error {
+// FinishBlock marks a block as completed
+func (f *File) FinishBlock(blockNumber int32) error {
 	var err error
 
 	f.withWriteLock(func() {
@@ -226,6 +230,34 @@ func (f *File) CompleteBlock(blockNumber int32) error {
 	})
 
 	return err
+}
+
+func (f *File) FinishBlockBackToSource(blockNumber int32) error {
+	block, err := f.getBlockWithValidation(blockNumber)
+	if err != nil {
+		return err
+	}
+
+	peerID := block.GetPeerID()
+	peer, ok := f.Host.LoadPeer(block.GetPeerID())
+	if !ok {
+		return fmt.Errorf("peer %s not found", peerID)
+	}
+
+	var finished bool = true
+	pieceNumbers := block.GetPieceNumbers()
+	for _, pieceNumber := range pieceNumbers {
+		if !peer.FinishedPieces.Test(uint(pieceNumber)) {
+			finished = false
+			break
+		}
+	}
+
+	if finished {
+		f.FinishBlock(blockNumber)
+	}
+
+	return nil
 }
 
 // GetMissingBlocks returns block numbers that are not completed yet

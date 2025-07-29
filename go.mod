@@ -279,3 +279,5 @@ require (
 	gorm.io/driver/sqlserver v1.4.1 // indirect
 	gorm.io/plugin/dbresolver v1.3.0 // indirect
 )
+
+replace d7y.io/api/v2 => github.com/SouthWest7/api/v2 v2.6.0

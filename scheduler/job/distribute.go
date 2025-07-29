@@ -68,15 +68,15 @@ type Distribute struct {
 }
 
 // NewDistribute creates a new event-driven scheduler
-func NewDistribute(resource standard.Resource, file *standard.File, rateLimit *uint64, scheduleInterval *uint64) *Distribute {
+func NewDistribute(resource standard.Resource, file *standard.File, rateLimit uint64, scheduleInterval uint64) *Distribute {
 	return &Distribute{
 		resource:          resource,
 		file:              file,
 		events:            &sync.Map{},
 		downloadQueue:     make([]string, 0),
 		uploadQueue:       make(map[int32][]string),
-		rateLimit:         *rateLimit,
-		scheduleInterval:  time.Duration(*scheduleInterval) * time.Millisecond,
+		rateLimit:         rateLimit,
+		scheduleInterval:  time.Duration(scheduleInterval) * time.Millisecond,
 		bandwidthUseRatio: 0.8,
 	}
 }
@@ -206,7 +206,7 @@ func (es *Distribute) downloadBlock(ctx context.Context, event *standard.Event, 
 		}
 	}
 
-	if err := file.CompleteBlock(event.BlockNumber); err != nil {
+	if err := file.FinishBlock(event.BlockNumber); err != nil {
 		logger.Errorf("[distribute]: failed to complete block %d for peer %s: %s, count: %d", event.BlockNumber, event.DownloadHost, err.Error(), count)
 	} else {
 		block.State = standard.BlockStateCompleted

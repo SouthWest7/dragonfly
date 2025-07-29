@@ -52,10 +52,15 @@ func newDistribute(job *internaljob.Job) Distribute {
 func (cs *distribute) CreateDistribute(ctx context.Context, schedulers []models.Scheduler, args types.DistributeArgs) (*internaljob.GroupJobState, error) {
 	// Convert args to internal distribute request
 	req := &internaljob.DistributeRequest{
-		URL:         args.URL,
-		PieceLength: args.PieceLength,
-		BlockLength: args.BlockLength,
-		Headers:     args.Headers,
+		URL:                 args.URL,
+		PieceLength:         args.PieceLength,
+		BlockLength:         args.BlockLength,
+		RateLimit:           args.RateLimit,
+		ScheduleInterval:    args.ScheduleInterval,
+		Tag:                 args.Tag,
+		Application:         args.Application,
+		FilteredQueryParams: args.FilteredQueryParams,
+		Headers:             args.Headers,
 	}
 
 	// Get scheduler queues
