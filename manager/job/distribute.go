@@ -55,6 +55,7 @@ func (cs *distribute) CreateDistribute(ctx context.Context, schedulers []models.
 		URL:                 args.URL,
 		PieceLength:         args.PieceLength,
 		BlockLength:         args.BlockLength,
+		ContentLength:       args.ContentLength,
 		RateLimit:           args.RateLimit,
 		ScheduleInterval:    args.ScheduleInterval,
 		Tag:                 args.Tag,

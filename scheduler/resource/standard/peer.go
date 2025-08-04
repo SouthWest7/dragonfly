@@ -173,8 +173,8 @@ type Peer struct {
 	// Host is peer host.
 	Host *Host
 
-	// BlockParents is bad parents ids.
-	BlockParents set.SafeSet[string]
+	// PartitionParents is bad parents ids.
+	PartitionParents set.SafeSet[string]
 
 	// AllocatedParents is allocated parents ids.
 	AllocatedParents set.SafeSet[string]
@@ -212,7 +212,7 @@ func NewPeer(id string, task *Task, host *Host, options ...PeerOption) *Peer {
 		AnnouncePeerStream:      &atomic.Value{},
 		Task:                    task,
 		Host:                    host,
-		BlockParents:            set.NewSafeSet[string](),
+		PartitionParents:        set.NewSafeSet[string](),
 		AllocatedParents:        set.NewSafeSet[string](),
 		NeedBackToSource:        atomic.NewBool(false),
 		PieceUpdatedAt:          atomic.NewTime(time.Now()),

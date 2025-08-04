@@ -3243,7 +3243,7 @@ func TestServiceV1_storePeer(t *testing.T) {
 				assert.Equal(peer.FSM.Current(), resource.PeerStatePending)
 				assert.EqualValues(peer.Task, mockTask)
 				assert.EqualValues(peer.Host, mockHost)
-				assert.Equal(peer.BlockParents.Len(), uint(0))
+				assert.Equal(peer.PartitionParents.Len(), uint(0))
 				assert.Equal(peer.NeedBackToSource.Load(), false)
 				assert.NotEqual(peer.PieceUpdatedAt.Load(), 0)
 				assert.NotEqual(peer.CreatedAt.Load(), 0)

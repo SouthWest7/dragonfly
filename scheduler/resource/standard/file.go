@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"time"
 
 	logger "d7y.io/dragonfly/v2/internal/dflog"
 	"d7y.io/dragonfly/v2/pkg/container/set"
@@ -44,17 +45,23 @@ type File struct {
 	// ContentLength is file content length.
 	ContentLength int64
 
-	// TotalBlocks is total blocks.
-	TotalBlocks uint
+	// TotalPartitions is total partitions.
+	TotalPartitions uint
 
-	// BlockLength is default block length.
-	BlockLength uint64
+	// PartitionLength is default partition length.
+	PartitionLength uint64
 
-	// Blocks maps block number to Block.
-	Blocks *sync.Map
+	// Partitions maps partition number to Partition.
+	Partitions *sync.Map
 
-	// FinishedBlocks is the set of completed block numbers.
-	FinishedBlocks *bitset.BitSet
+	// FinishedPartitions is the set of completed partition numbers.
+	FinishedPartitions *bitset.BitSet
+
+	// Finished is the flag indicating whether the file is finished.
+	Finished bool
+
+	// FinishedAt is the time when the file is finished.
+	FinishedAt time.Time
 
 	// ActivePeers is the set of active peer ids downloading blocks.
 	ActivePeers set.SafeSet[string]
@@ -70,22 +77,22 @@ type File struct {
 func NewFile(id, taskID, url string, pieceLength uint, contentLength int64, blockLength uint64) *File {
 	totalBlocks := uint(math.Ceil(float64(contentLength) / float64(blockLength)))
 	return &File{
-		ID:             id,
-		TaskID:         taskID,
-		URL:            url,
-		PieceLength:    pieceLength,
-		ContentLength:  contentLength,
-		TotalBlocks:    totalBlocks,
-		BlockLength:    blockLength,
-		Blocks:         &sync.Map{},
-		FinishedBlocks: &bitset.BitSet{},
-		ActivePeers:    set.NewSafeSet[string](),
-		Host:           nil, // Will be set when file is stored to host
+		ID:                 id,
+		TaskID:             taskID,
+		URL:                url,
+		PieceLength:        pieceLength,
+		ContentLength:      contentLength,
+		TotalPartitions:    totalBlocks,
+		PartitionLength:    blockLength,
+		Partitions:         &sync.Map{},
+		FinishedPartitions: &bitset.BitSet{},
+		ActivePeers:        set.NewSafeSet[string](),
+		Host:               nil, // Will be set when file is stored to host
 	}
 }
 
-// AssignBlockToPeer
-func AssignBlockToPeer(task *Task, host *Host, peer *Peer) error {
+// AssignPartitionToPeer
+func AssignPartitionToPeer(task *Task, host *Host, peer *Peer) error {
 	if peer.Range == nil {
 		logger.Warnf("[distribute]: peer %s has no range", peer.ID)
 		return nil
@@ -98,18 +105,18 @@ func AssignBlockToPeer(task *Task, host *Host, peer *Peer) error {
 		return fmt.Errorf("file %s not found", file_id)
 	}
 
-	blockNumber := file.CalculateBlockNumber(peer.Range)
+	blockNumber := file.CalculatePartitionNumber(peer.Range)
 	if blockNumber == -1 {
 		logger.Warnf("[distribute]: block number is -1")
 		return nil
 	}
 
-	if _, err := file.AssignBlockToPeer(blockNumber, peer.ID); err != nil {
+	if _, err := file.AssignPartitionToPeer(blockNumber, peer.ID); err != nil {
 		logger.Warnf("[distribute]: failed to assign block %d to peer %s: %v", blockNumber, peer.ID, err)
 		return err
 	}
 
-	block, _ := file.GetBlock(blockNumber)
+	block, _ := file.GetPartition(blockNumber)
 	if block != nil {
 		peer.AllocatedParents.Add(block.ParentID)
 	}
@@ -119,31 +126,31 @@ func AssignBlockToPeer(task *Task, host *Host, peer *Peer) error {
 	return nil
 }
 
-// CreateBlocks creates all blocks for this file
-func (f *File) CreateBlocks() {
+// CreatePartitions creates all blocks for this file
+func (f *File) CreatePartitions() {
 	f.withWriteLock(func() {
-		for i := uint(0); i < f.TotalBlocks; i++ {
-			offset := uint64(i) * f.BlockLength
-			length := f.BlockLength
+		for i := uint(0); i < f.TotalPartitions; i++ {
+			offset := uint64(i) * f.PartitionLength
+			length := f.PartitionLength
 
 			// Adjust length for the last block
 			if offset+length > uint64(f.ContentLength) {
 				length = uint64(f.ContentLength) - offset
 			}
 
-			block := NewBlock(int32(i), offset, length, f.TaskID, f.PieceLength)
-			f.Blocks.Store(int32(i), block)
+			block := NewPartition(int32(i), offset, length, f.TaskID, f.PieceLength)
+			f.Partitions.Store(int32(i), block)
 		}
 	})
 }
 
-// GetBlock returns a block by its number
-func (f *File) GetBlock(blockNumber int32) (*Block, bool) {
-	value, exists := f.Blocks.Load(blockNumber)
+// GetPartition returns a partition by its number
+func (f *File) GetPartition(partitionNumber int32) (*Partition, bool) {
+	value, exists := f.Partitions.Load(partitionNumber)
 	if !exists {
 		return nil, false
 	}
-	return value.(*Block), true
+	return value.(*Partition), true
 }
 
 // withWriteLock 执行需要写锁的操作
@@ -160,50 +167,48 @@ func (f *File) withReadLock(fn func()) {
 	fn()
 }
 
-// getBlockWithValidation 获取 block 并验证其存在性
-func (f *File) getBlockWithValidation(blockNumber int32) (*Block, error) {
-	block, exists := f.GetBlock(blockNumber)
+// getPartitionWithValidation 获取 block 并验证其存在性
+func (f *File) getPartitionWithValidation(blockNumber int32) (*Partition, error) {
+	block, exists := f.GetPartition(blockNumber)
 	if !exists {
 		return nil, fmt.Errorf("block %d not found", blockNumber)
 	}
 	return block, nil
 }
 
-// collectBlocks 通用的块收集函数
-func (f *File) collectBlocks(filterFn func(*Block) bool) []*Block {
-	var blocks []*Block
-	f.Blocks.Range(func(key, value interface{}) bool {
-		block := value.(*Block)
+// collectPartitions 通用的块收集函数
+func (f *File) collectPartitions(filterFn func(*Partition) bool) []*Partition {
+	var blocks []*Partition
+	f.forEachPartition(func(block *Partition) {
 		if filterFn == nil || filterFn(block) {
 			blocks = append(blocks, block)
 		}
-		return true
 	})
 	return blocks
 }
 
-// forEachBlock 遍历所有块并执行操作
-func (f *File) forEachBlock(fn func(*Block)) {
-	f.Blocks.Range(func(key, value interface{}) bool {
-		block := value.(*Block)
+// forEachPartition 遍历所有块并执行操作
+func (f *File) forEachPartition(fn func(*Partition)) {
+	f.Partitions.Range(func(key, value interface{}) bool {
+		block := value.(*Partition)
 		fn(block)
 		return true
 	})
 }
 
-// AssignBlockToPeer assigns a block to a specific peer
-func (f *File) AssignBlockToPeer(blockNumber int32, peerID string) (*Block, error) {
-	var block *Block
+// AssignPartitionToPeer assigns a partition to a specific peer
+func (f *File) AssignPartitionToPeer(partitionNumber int32, peerID string) (*Partition, error) {
+	var block *Partition
 	var err error
 
 	f.withWriteLock(func() {
-		block, err = f.getBlockWithValidation(blockNumber)
+		block, err = f.getPartitionWithValidation(partitionNumber)
 		if err != nil {
 			return
 		}
 
 		if block.GetPeerID() != "" && block.GetPeerID() != peerID {
-			err = fmt.Errorf("block %d already assigned to peer %s", blockNumber, block.GetPeerID())
+			err = fmt.Errorf("partition %d already assigned to peer %s", partitionNumber, block.GetPeerID())
 			return
 		}
 
@@ -214,26 +219,26 @@ func (f *File) AssignBlockToPeer(blockNumber int32, peerID string) (*Block, erro
 	return block, err
 }
 
-// FinishBlock marks a block as completed
-func (f *File) FinishBlock(blockNumber int32) error {
+// FinishPartition marks a partition as completed
+func (f *File) FinishPartition(partitionNumber int32) error {
 	var err error
 
 	f.withWriteLock(func() {
-		block, blockErr := f.getBlockWithValidation(blockNumber)
+		block, blockErr := f.getPartitionWithValidation(partitionNumber)
 		if blockErr != nil {
 			err = blockErr
 			return
 		}
 
-		block.State = BlockStateCompleted
-		f.FinishedBlocks.Set(uint(blockNumber))
+		block.State = PartitionStateCompleted
+		f.FinishedPartitions.Set(uint(partitionNumber))
 	})
 
 	return err
 }
 
-func (f *File) FinishBlockBackToSource(blockNumber int32) error {
-	block, err := f.getBlockWithValidation(blockNumber)
+func (f *File) FinishPartitionBackToSource(partitionNumber int32) error {
+	block, err := f.getPartitionWithValidation(partitionNumber)
 	if err != nil {
 		return err
 	}
@@ -254,22 +259,22 @@ func (f *File) FinishBlockBackToSource(blockNumber int32) error {
 	}
 
 	if finished {
-		f.FinishBlock(blockNumber)
+		f.FinishPartition(partitionNumber)
 	}
 
 	return nil
 }
 
-// GetMissingBlocks returns block numbers that are not completed yet
-func (f *File) GetMissingBlocks() []int32 {
+// GetMissingPartitions returns block numbers that are not completed yet
+func (f *File) GetMissingPartitions() []int32 {
 	var missing []int32
 
-	for i := int32(0); i < int32(f.TotalBlocks); i++ {
-		block, exists := f.GetBlock(i)
+	for i := int32(0); i < int32(f.TotalPartitions); i++ {
+		block, exists := f.GetPartition(i)
 		if !exists {
 			continue
 		}
-		if block.State == BlockStateCompleted || block.State == BlockStateDownload {
+		if block.State == PartitionStateCompleted || block.State == PartitionStateDownload {
 			continue
 		}
 
@@ -278,8 +283,8 @@ func (f *File) GetMissingBlocks() []int32 {
 				if peer.FSM.Is(PeerStateSucceeded) {
 					// Update the cached status with proper write lock
 					f.withWriteLock(func() {
-						block.State = BlockStateCompleted
-						f.FinishedBlocks.Set(uint(i))
+						block.State = PartitionStateCompleted
+						f.FinishedPartitions.Set(uint(i))
 					})
 					continue
 				}
@@ -291,15 +296,15 @@ func (f *File) GetMissingBlocks() []int32 {
 	return missing
 }
 
-// IsBlockFinished checks if a block is completed using cached status and peer state
-func (f *File) IsBlockFinished(blockNumber int32) bool {
-	block, exists := f.GetBlock(blockNumber)
+// IsPartitionFinished checks if a block is completed using cached status and peer state
+func (f *File) IsPartitionFinished(blockNumber int32) bool {
+	block, exists := f.GetPartition(blockNumber)
 	if !exists || block.GetPeerID() == "" {
 		return false
 	}
 
 	// Fast path: if block is already marked as completed, return true
-	if block.State == BlockStateCompleted {
+	if block.State == PartitionStateCompleted {
 		return true
 	}
 
@@ -309,8 +314,8 @@ func (f *File) IsBlockFinished(blockNumber int32) bool {
 			if peer.FSM.Is(PeerStateSucceeded) {
 				// Update the cached status with proper write lock
 				f.withWriteLock(func() {
-					block.State = BlockStateCompleted
-					f.FinishedBlocks.Set(uint(blockNumber))
+					block.State = PartitionStateCompleted
+					f.FinishedPartitions.Set(uint(blockNumber))
 				})
 				return true
 			}
@@ -320,17 +325,17 @@ func (f *File) IsBlockFinished(blockNumber int32) bool {
 	return false
 }
 
-func (f *File) IsBlockDownloading(blockNumber int32) bool {
-	block, exists := f.GetBlock(blockNumber)
+func (f *File) IsPartitionDownloading(blockNumber int32) bool {
+	block, exists := f.GetPartition(blockNumber)
 	if !exists || block.GetPeerID() == "" {
 		return false
 	}
-	return block.State == BlockStateDownload
+	return block.State == PartitionStateDownload
 }
 
-// IsBlockAssigned checks if a block is being downloaded by a specific peer
-func (f *File) IsBlockAssigned(blockNumber int32, peerID string) bool {
-	block, exists := f.GetBlock(blockNumber)
+// IsPartitionAssigned checks if a block is being downloaded by a specific peer
+func (f *File) IsPartitionAssigned(blockNumber int32, peerID string) bool {
+	block, exists := f.GetPartition(blockNumber)
 	if !exists || block.GetPeerID() != peerID {
 		return false
 	}
@@ -346,19 +351,27 @@ func (f *File) IsBlockAssigned(blockNumber int32, peerID string) bool {
 	return false
 }
 
-// GetBlocksByPeer returns all blocks assigned to a specific peer
-func (f *File) GetBlocksByPeer(peerID string) []*Block {
-	return f.collectBlocks(func(block *Block) bool {
+// GetPartitionsByPeer returns all partitions assigned to a specific peer
+func (f *File) GetPartitionsByPeer(peerID string) []*Partition {
+	return f.collectPartitions(func(block *Partition) bool {
 		return block.GetPeerID() == peerID
 	})
 }
 
-// IsFinished checks if all blocks are completed
+// IsFinished checks if all partitions are completed
 func (f *File) IsFinished() bool {
+	if f.Finished {
+		return true
+	}
+
 	var result bool
 	f.withReadLock(func() {
-		result = f.FinishedBlocks.Count() == uint(f.TotalBlocks)
+		result = f.FinishedPartitions.Count() == uint(f.TotalPartitions)
 	})
+	if result {
+		f.Finished = result
+		f.FinishedAt = time.Now()
+	}
 	return result
 }
 
@@ -366,57 +379,57 @@ func (f *File) IsFinished() bool {
 func (f *File) GetCompletionRatio() float64 {
 	var result float64
 	f.withReadLock(func() {
-		if f.TotalBlocks == 0 {
+		if f.TotalPartitions == 0 {
 			result = 0.0
 		} else {
-			result = float64(f.FinishedBlocks.Count()) / float64(f.TotalBlocks)
+			result = float64(f.FinishedPartitions.Count()) / float64(f.TotalPartitions)
 		}
 	})
 	return result
 }
 
-// RemovePeer removes a peer and resets all its assigned blocks
+// RemovePeer removes a peer and resets all its assigned partitions
 func (f *File) RemovePeer(peerID string) {
 	f.withWriteLock(func() {
-		f.forEachBlock(func(block *Block) {
+		f.forEachPartition(func(block *Partition) {
 			if block.GetPeerID() == peerID {
 				block.PeerID = ""
-				f.FinishedBlocks.Clear(uint(block.Number))
+				f.FinishedPartitions.Clear(uint(block.Number))
 			}
 		})
 		f.ActivePeers.Delete(peerID)
 	})
 }
 
-// GetBlockHTTPRange returns the HTTP range string for a block
-func (f *File) GetBlockHTTPRange(blockNumber int32) (string, error) {
-	block, err := f.getBlockWithValidation(blockNumber)
+// GetPartitionHTTPRange returns the HTTP range string for a partition
+func (f *File) GetPartitionHTTPRange(partitionNumber int32) (string, error) {
+	block, err := f.getPartitionWithValidation(partitionNumber)
 	if err != nil {
 		return "", err
 	}
 	return block.GetHTTPRange(), nil
 }
 
-// GetAllBlocks returns all blocks as a slice
-func (f *File) GetAllBlocks() []*Block {
-	return f.collectBlocks(nil)
+// GetAllPartitions returns all partitions as a slice
+func (f *File) GetAllPartitions() []*Partition {
+	return f.collectPartitions(nil)
 }
 
-// CalculateBlockNumber calculates which block number corresponds to a given HTTP range
-func (f *File) CalculateBlockNumber(r *nethttp.Range) int32 {
+// CalculatePartitionNumber calculates which partition number corresponds to a given HTTP range
+func (f *File) CalculatePartitionNumber(r *nethttp.Range) int32 {
 	if r == nil || r.Start < 0 || r.Length <= 0 {
 		return -1 // 返回 -1 表示无效
 	}
 
-	// 根据 range 的起始位置计算对应的 block number
-	blockNumber := int32(r.Start / int64(f.BlockLength))
+	// 根据 range 的起始位置计算对应的 partition number
+	blockNumber := int32(r.Start / int64(f.PartitionLength))
 
-	// 确保 block number 在有效范围内
+	// 确保 partition number 在有效范围内
 	if blockNumber < 0 {
 		blockNumber = 0
 	}
-	if blockNumber >= int32(f.TotalBlocks) {
-		blockNumber = int32(f.TotalBlocks) - 1
+	if blockNumber >= int32(f.TotalPartitions) {
+		blockNumber = int32(f.TotalPartitions) - 1
 	}
 
 	return blockNumber

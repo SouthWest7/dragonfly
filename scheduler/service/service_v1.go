@@ -1109,11 +1109,11 @@ func (v *V1) handlePieceFailure(ctx context.Context, peer *resource.Peer, piece 
 	parent, loaded := v.resource.PeerManager().Load(piece.DstPid)
 	if !loaded {
 		peer.Log.Errorf("parent %s not found", piece.DstPid)
-		peer.BlockParents.Add(piece.DstPid)
+		peer.PartitionParents.Add(piece.DstPid)
 
 		// Record the start time.
 		start := time.Now()
-		v.scheduling.ScheduleParentAndCandidateParents(ctx, peer, peer.BlockParents)
+		v.scheduling.ScheduleParentAndCandidateParents(ctx, peer, peer.PartitionParents)
 
 		// Collect SchedulingDuration metrics.
 		metrics.ScheduleDuration.Observe(float64(time.Since(start).Milliseconds()))
@@ -1174,11 +1174,11 @@ func (v *V1) handlePieceFailure(ctx context.Context, peer *resource.Peer, piece 
 	}
 
 	peer.Log.Infof("reschedule parent because of failed piece")
-	peer.BlockParents.Add(parent.ID)
+	peer.PartitionParents.Add(parent.ID)
 
 	// Record the start time.
 	start := time.Now()
-	v.scheduling.ScheduleParentAndCandidateParents(ctx, peer, peer.BlockParents)
+	v.scheduling.ScheduleParentAndCandidateParents(ctx, peer, peer.PartitionParents)
 
 	// Collect SchedulingDuration metrics.
 	metrics.ScheduleDuration.Observe(float64(time.Since(start).Milliseconds()))
@@ -1226,7 +1226,7 @@ func (v *V1) handlePeerFailure(ctx context.Context, peer *resource.Peer) {
 
 		// Record the start time.
 		start := time.Now()
-		v.scheduling.ScheduleParentAndCandidateParents(ctx, child, child.BlockParents)
+		v.scheduling.ScheduleParentAndCandidateParents(ctx, child, child.PartitionParents)
 
 		// Collect SchedulingDuration metrics.
 		metrics.ScheduleDuration.Observe(float64(time.Since(start).Milliseconds()))
@@ -1247,7 +1247,7 @@ func (v *V1) handleLegacySeedPeer(ctx context.Context, peer *resource.Peer) {
 
 		// Record the start time.
 		start := time.Now()
-		v.scheduling.ScheduleParentAndCandidateParents(ctx, child, child.BlockParents)
+		v.scheduling.ScheduleParentAndCandidateParents(ctx, child, child.PartitionParents)
 
 		// Collect SchedulingDuration metrics.
 		metrics.ScheduleDuration.Observe(float64(time.Since(start).Milliseconds()))

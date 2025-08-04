@@ -2987,7 +2987,7 @@ func TestServiceV2_handleDownloadPieceFailedRequest(t *testing.T) {
 				assert := assert.New(t)
 				assert.NoError(svc.handleDownloadPieceFailedRequest(context.Background(), peer.ID, req))
 				assert.NotEqual(peer.UpdatedAt.Load(), 0)
-				assert.True(peer.BlockParents.Contains(req.GetParentId()))
+				assert.True(peer.PartitionParents.Contains(req.GetParentId()))
 				assert.NotEqual(peer.Task.UpdatedAt.Load(), 0)
 			},
 		},
@@ -3009,7 +3009,7 @@ func TestServiceV2_handleDownloadPieceFailedRequest(t *testing.T) {
 				assert := assert.New(t)
 				assert.NoError(svc.handleDownloadPieceFailedRequest(context.Background(), peer.ID, req))
 				assert.NotEqual(peer.UpdatedAt.Load(), 0)
-				assert.True(peer.BlockParents.Contains(req.GetParentId()))
+				assert.True(peer.PartitionParents.Contains(req.GetParentId()))
 				assert.NotEqual(peer.Task.UpdatedAt.Load(), 0)
 				assert.Equal(peer.Host.UploadFailedCount.Load(), int64(1))
 			},

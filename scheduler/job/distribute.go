@@ -147,7 +147,7 @@ func (es *Distribute) downloadBlock(ctx context.Context, event *standard.Event, 
 	}
 
 	// Get block information to create Range
-	block, exists := file.GetBlock(event.BlockNumber)
+	block, exists := file.GetPartition(event.BlockNumber)
 	if !exists {
 		logger.Errorf("[distribute]: block %d not found in file %s", event.BlockNumber, es.file.ID)
 		return
@@ -200,16 +200,16 @@ func (es *Distribute) downloadBlock(ctx context.Context, event *standard.Event, 
 				logger.Infof("[distribute]: download completed for block %d, peer %s, count: %d", event.BlockNumber, event.DownloadHost, count)
 				break
 			}
-			block.State = standard.BlockStateFailed
+			block.State = standard.PartitionStateFailed
 			logger.Errorf("[distribute]: download failed for block %d, peer %s: %s, count: %d", event.BlockNumber, event.DownloadHost, err.Error(), count)
 			return
 		}
 	}
 
-	if err := file.FinishBlock(event.BlockNumber); err != nil {
+	if err := file.FinishPartition(event.BlockNumber); err != nil {
 		logger.Errorf("[distribute]: failed to complete block %d for peer %s: %s, count: %d", event.BlockNumber, event.DownloadHost, err.Error(), count)
 	} else {
-		block.State = standard.BlockStateCompleted
+		block.State = standard.PartitionStateCompleted
 		logger.Infof("[distribute]: file %s completed block %d for peer %s, count: %d", es.file.ID, event.BlockNumber, event.DownloadHost, count)
 	}
 
@@ -231,7 +231,7 @@ func (es *Distribute) selectBlockForPeer(hostID string, count int) int32 {
 		return -1
 	}
 
-	missingBlocks := file.GetMissingBlocks()
+	missingBlocks := file.GetMissingPartitions()
 	if len(missingBlocks) == 0 {
 		logger.Infof("[distribute]: no missing blocks for host %s, count: %d", hostID, count)
 		return -1
@@ -265,13 +265,13 @@ func (es *Distribute) createUploadQueue(count int) {
 	es.uploadQueue = make(map[int32][]string)
 
 	// For each block, find hosts that have it
-	for i := int32(0); i < int32(es.file.TotalBlocks); i++ {
+	for i := int32(0); i < int32(es.file.TotalPartitions); i++ {
 		var sources []string
 		es.resource.HostManager().Range(func(key, value any) bool {
 			if hostID, ok := key.(string); ok {
 				if host, ok := value.(*standard.Host); ok {
 					if file, found := host.LoadFile(es.file.ID); found {
-						if file.FinishedBlocks.Test(uint(i)) && es.getHostIdleUploadRate(hostID) > es.rateLimit {
+						if file.FinishedPartitions.Test(uint(i)) && es.getHostIdleUploadRate(hostID) > es.rateLimit {
 							sources = append(sources, hostID)
 						}
 					}
@@ -306,7 +306,7 @@ func (es *Distribute) createDownloadQueue(count int) int {
 		if hostID, ok := key.(string); ok {
 			if host, ok := value.(*standard.Host); ok {
 				if file, found := host.LoadFile(es.file.ID); found {
-					missing := file.GetMissingBlocks()
+					missing := file.GetMissingPartitions()
 					logger.Infof("[distribute]: host %s has %v missing blocks, count: %d", hostID, missing, count)
 					// Check if host has missing blocks and sufficient download bandwidth
 					if len(missing) > 0 && es.getHostIdleDownloadRate(hostID) > es.rateLimit {
@@ -334,8 +334,8 @@ func (es *Distribute) createDownloadQueue(count int) int {
 			return false
 		}
 
-		missingI := len(fileI.GetMissingBlocks())
-		missingJ := len(fileJ.GetMissingBlocks())
+		missingI := len(fileI.GetMissingPartitions())
+		missingJ := len(fileJ.GetMissingPartitions())
 
 		return missingI > missingJ
 	})
@@ -361,7 +361,7 @@ func (es *Distribute) createEvent(id string, blockNumber int32, taskID string, h
 		return nil
 	}
 
-	block, exists := file.GetBlock(blockNumber)
+	block, exists := file.GetPartition(blockNumber)
 	if !exists {
 		return nil
 	}
@@ -377,7 +377,7 @@ func (es *Distribute) createEvent(id string, blockNumber int32, taskID string, h
 		return nil
 	}
 
-	parentBlock, exists := parentFile.GetBlock(blockNumber)
+	parentBlock, exists := parentFile.GetPartition(blockNumber)
 	if !exists {
 		return nil
 	}
@@ -400,7 +400,7 @@ func (es *Distribute) createEvent(id string, blockNumber int32, taskID string, h
 	es.allocateRate(parentID, allocatedRate, true)
 	es.allocateRate(hostID, allocatedRate, false)
 
-	block.State = standard.BlockStateDownload
+	block.State = standard.PartitionStateDownload
 
 	return standard.NewEvent(id, blockNumber, taskID, hostID, parentID, allocatedRate, allocatedRate)
 }
@@ -435,7 +435,7 @@ func (es *Distribute) getHostIdleUploadRate(hostID string) uint64 {
 	}
 
 	occupied := host.Network.UploadRate
-	if host.Network.UploadRate < host.Network.AllocatedUploadRate {
+	if host.Network.UploadRate > host.Network.AllocatedUploadRate {
 		occupied = host.Network.AllocatedUploadRate
 	}
 	return host.Network.UploadRateLimit - occupied
@@ -449,7 +449,7 @@ func (es *Distribute) getHostIdleDownloadRate(hostID string) uint64 {
 	}
 
 	occupied := host.Network.DownloadRate
-	if host.Network.DownloadRate < host.Network.AllocatedDownloadRate {
+	if host.Network.DownloadRate > host.Network.AllocatedDownloadRate {
 		occupied = host.Network.AllocatedDownloadRate
 	}
 	return host.Network.DownloadRateLimit - occupied

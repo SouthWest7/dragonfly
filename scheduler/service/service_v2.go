@@ -552,7 +552,7 @@ func (v *V2) DeleteTask(_ctx context.Context, req *schedulerv2.DeleteTaskRequest
 
 // AnnounceHost announces host to scheduler.
 func (v *V2) AnnounceHost(ctx context.Context, req *schedulerv2.AnnounceHostRequest) error {
-	logger.WithHostID(req.Host.GetId()).Infof("announce host request: %#v", req.GetHost())
+	// logger.WithHostID(req.Host.GetId()).Infof("announce host request: %#v", req.GetHost())
 
 	// Get cluster config by manager.
 	var concurrentUploadLimit int32
@@ -919,7 +919,7 @@ func (v *V2) AnnounceHost(ctx context.Context, req *schedulerv2.AnnounceHostRequ
 			persistentCacheHost.AnnounceInterval = req.GetInterval().AsDuration()
 		}
 
-		persistentCacheHost.Log.Infof("update persistent cache host: %#v", req)
+		// persistentCacheHost.Log.Infof("update persistent cache host: %#v", req)
 		if err := v.persistentCacheResource.HostManager().Store(ctx, persistentCacheHost); err != nil {
 			persistentCacheHost.Log.Errorf("store persistent cache host failed: %s", err)
 			return err
@@ -1168,11 +1168,11 @@ func (v *V2) handleRegisterPeerRequest(ctx context.Context, stream schedulerv2.S
 		}
 
 		// Scheduling parent for the peer.
-		peer.BlockParents.Add(peer.ID)
+		peer.PartitionParents.Add(peer.ID)
 
 		// Record the start time.
 		start := time.Now()
-		if err := v.scheduling.ScheduleCandidateParents(context.Background(), peer, peer.BlockParents); err != nil {
+		if err := v.scheduling.ScheduleCandidateParents(context.Background(), peer, peer.PartitionParents); err != nil {
 			// Collect RegisterPeerFailureCount metrics.
 			metrics.RegisterPeerFailureCount.WithLabelValues(priority.String(), peer.Task.Type.String(),
 				peer.Host.Type.Name()).Inc()
@@ -1252,12 +1252,12 @@ func (v *V2) handleReschedulePeerRequest(_ context.Context, peerID string, candi
 
 	// Add candidate parent ids to block parents.
 	for _, candidateParent := range candidateParents {
-		peer.BlockParents.Add(candidateParent.GetId())
+		peer.PartitionParents.Add(candidateParent.GetId())
 	}
 
 	// Record the start time.
 	start := time.Now()
-	if err := v.scheduling.ScheduleCandidateParents(context.Background(), peer, peer.BlockParents); err != nil {
+	if err := v.scheduling.ScheduleCandidateParents(context.Background(), peer, peer.PartitionParents); err != nil {
 		return status.Error(codes.FailedPrecondition, err.Error())
 	}
 
@@ -1505,7 +1505,7 @@ func (v *V2) handleDownloadPieceFailedRequest(_ context.Context, peerID string, 
 	if req.Temporary {
 		// Handle peer with piece temporary failed request.
 		peer.UpdatedAt.Store(time.Now())
-		peer.BlockParents.Add(req.GetParentId())
+		peer.PartitionParents.Add(req.GetParentId())
 		if parent, loaded := v.resource.PeerManager().Load(req.GetParentId()); loaded {
 			parent.Host.UploadFailedCount.Inc()
 		}
@@ -1582,7 +1582,7 @@ func (v *V2) handleResource(_ context.Context, stream schedulerv2.Scheduler_Anno
 		}
 
 		peer = standard.NewPeer(peerID, task, host, options...)
-		standard.AssignBlockToPeer(task, host, peer)
+		standard.AssignPartitionToPeer(task, host, peer)
 		v.resource.PeerManager().Store(peer)
 	}
 
