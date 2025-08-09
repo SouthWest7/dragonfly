@@ -162,6 +162,15 @@ func (s *schedulerServerV2) DeleteHost(ctx context.Context, req *schedulerv2.Del
 	return new(emptypb.Empty), nil
 }
 
+// SyncHost syncs host to scheduler.
+func (s *schedulerServerV2) SyncHost(ctx context.Context, req *schedulerv2.SyncHostRequest) (*emptypb.Empty, error) {
+	if err := s.service.SyncHost(ctx, req); err != nil {
+		return nil, err
+	}
+
+	return new(emptypb.Empty), nil
+}
+
 // AnnouncePersistentCachePeer announces persistent cache peer to scheduler.
 func (s *schedulerServerV2) AnnouncePersistentCachePeer(stream schedulerv2.Scheduler_AnnouncePersistentCachePeerServer) error {
 	// Collect AnnouncePersistentCachePeerCount metrics.

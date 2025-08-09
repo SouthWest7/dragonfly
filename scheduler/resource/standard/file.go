@@ -121,27 +121,66 @@ func AssignPartitionToPeer(task *Task, host *Host, peer *Peer) error {
 		peer.AllocatedParents.Add(block.ParentID)
 	}
 
-	logger.Infof("[distribute]: assigned block %d to peer %s", blockNumber, peer.ID)
+	logger.Infof("[distribute]: assigned parent %s to peer %s", block.ParentID, peer.ID)
 
 	return nil
 }
 
+func FinishPartitionByPeer(task *Task, host *Host, peer *Peer) error {
+	file, ok := host.LoadFile(task.ID)
+	if !ok {
+		logger.Warnf("[distribute]: file %s not found", task.ID)
+		return fmt.Errorf("file %s not found", task.ID)
+	}
+
+	blockNumber := file.CalculatePartitionNumber(peer.Range)
+	if blockNumber == -1 {
+		logger.Warnf("[distribute]: block number is -1")
+		return fmt.Errorf("block number is -1")
+	}
+
+	file.FinishPartition(blockNumber)
+
+	return nil
+}
+
+func FinishFile(resource Resource, hostID string, taskID string, peerID string) {
+	if host, ok := resource.HostManager().Load(hostID); ok {
+		if file, ok := host.LoadFile(taskID); ok {
+			if !file.IsFinished() {
+				for i := int32(0); i < int32(file.TotalPartitions); i++ {
+					if file.FinishedPartitions.Test(uint(i)) {
+						continue
+					}
+
+					if _, err := file.AssignPartitionToPeer(i, peerID); err != nil {
+						logger.Warnf("[distribute]: failed to assign block %d to seed peer %s: %s", i, peerID, err.Error())
+						continue
+					}
+
+					if err := file.FinishPartitionBackToSource(i); err != nil {
+						logger.Warnf("[distribute]: failed to complete block %d for seed peer %s: %s", i, peerID, err.Error())
+					}
+				}
+			}
+		}
+	}
+}
+
 // CreatePartitions creates all blocks for this file
 func (f *File) CreatePartitions() {
-	f.withWriteLock(func() {
-		for i := uint(0); i < f.TotalPartitions; i++ {
-			offset := uint64(i) * f.PartitionLength
-			length := f.PartitionLength
+	for i := uint(0); i < f.TotalPartitions; i++ {
+		offset := uint64(i) * f.PartitionLength
+		length := f.PartitionLength
 
-			// Adjust length for the last block
-			if offset+length > uint64(f.ContentLength) {
-				length = uint64(f.ContentLength) - offset
-			}
-
-			block := NewPartition(int32(i), offset, length, f.TaskID, f.PieceLength)
-			f.Partitions.Store(int32(i), block)
+		// Adjust length for the last block
+		if offset+length > uint64(f.ContentLength) {
+			length = uint64(f.ContentLength) - offset
 		}
-	})
+
+		block := NewPartition(int32(i), offset, length, f.TaskID, f.PieceLength)
+		f.Partitions.Store(int32(i), block)
+	}
 }
 
 // GetPartition returns a partition by its number
@@ -151,20 +190,6 @@ func (f *File) GetPartition(partitionNumber int32) (*Partition, bool) {
 		return nil, false
 	}
 	return value.(*Partition), true
-}
-
-// withWriteLock 执行需要写锁的操作
-func (f *File) withWriteLock(fn func()) {
-	f.mutex.Lock()
-	defer f.mutex.Unlock()
-	fn()
-}
-
-// withReadLock 执行需要读锁的操作
-func (f *File) withReadLock(fn func()) {
-	f.mutex.RLock()
-	defer f.mutex.RUnlock()
-	fn()
 }
 
 // getPartitionWithValidation 获取 block 并验证其存在性
@@ -201,20 +226,18 @@ func (f *File) AssignPartitionToPeer(partitionNumber int32, peerID string) (*Par
 	var block *Partition
 	var err error
 
-	f.withWriteLock(func() {
-		block, err = f.getPartitionWithValidation(partitionNumber)
-		if err != nil {
-			return
-		}
+	block, err = f.getPartitionWithValidation(partitionNumber)
+	if err != nil {
+		return nil, err
+	}
 
-		if block.GetPeerID() != "" && block.GetPeerID() != peerID {
-			err = fmt.Errorf("partition %d already assigned to peer %s", partitionNumber, block.GetPeerID())
-			return
-		}
+	if block.GetPeerID() != "" && block.GetPeerID() != peerID {
+		err = fmt.Errorf("partition %d already assigned to peer %s", partitionNumber, block.GetPeerID())
+		return nil, err
+	}
 
-		block.AssignToPeer(peerID)
-		f.ActivePeers.Add(peerID)
-	})
+	block.AssignToPeer(peerID)
+	f.ActivePeers.Add(peerID)
 
 	return block, err
 }
@@ -223,16 +246,14 @@ func (f *File) AssignPartitionToPeer(partitionNumber int32, peerID string) (*Par
 func (f *File) FinishPartition(partitionNumber int32) error {
 	var err error
 
-	f.withWriteLock(func() {
-		block, blockErr := f.getPartitionWithValidation(partitionNumber)
-		if blockErr != nil {
-			err = blockErr
-			return
-		}
+	block, blockErr := f.getPartitionWithValidation(partitionNumber)
+	if blockErr != nil {
+		err = blockErr
+		return err
+	}
 
-		block.State = PartitionStateCompleted
-		f.FinishedPartitions.Set(uint(partitionNumber))
-	})
+	block.State = PartitionStateCompleted
+	f.FinishedPartitions.Set(uint(partitionNumber))
 
 	return err
 }
@@ -282,10 +303,8 @@ func (f *File) GetMissingPartitions() []int32 {
 			if peer, loaded := f.Host.LoadPeer(block.GetPeerID()); loaded {
 				if peer.FSM.Is(PeerStateSucceeded) {
 					// Update the cached status with proper write lock
-					f.withWriteLock(func() {
-						block.State = PartitionStateCompleted
-						f.FinishedPartitions.Set(uint(i))
-					})
+					block.State = PartitionStateCompleted
+					f.FinishedPartitions.Set(uint(i))
 					continue
 				}
 			}
@@ -313,10 +332,8 @@ func (f *File) IsPartitionFinished(blockNumber int32) bool {
 		if peer, loaded := f.Host.LoadPeer(block.GetPeerID()); loaded {
 			if peer.FSM.Is(PeerStateSucceeded) {
 				// Update the cached status with proper write lock
-				f.withWriteLock(func() {
-					block.State = PartitionStateCompleted
-					f.FinishedPartitions.Set(uint(blockNumber))
-				})
+				block.State = PartitionStateCompleted
+				f.FinishedPartitions.Set(uint(blockNumber))
 				return true
 			}
 		}
@@ -365,9 +382,7 @@ func (f *File) IsFinished() bool {
 	}
 
 	var result bool
-	f.withReadLock(func() {
-		result = f.FinishedPartitions.Count() == uint(f.TotalPartitions)
-	})
+	result = f.FinishedPartitions.Count() == uint(f.TotalPartitions)
 	if result {
 		f.Finished = result
 		f.FinishedAt = time.Now()
@@ -378,27 +393,23 @@ func (f *File) IsFinished() bool {
 // GetCompletionRatio returns the completion ratio (0.0 to 1.0)
 func (f *File) GetCompletionRatio() float64 {
 	var result float64
-	f.withReadLock(func() {
-		if f.TotalPartitions == 0 {
-			result = 0.0
-		} else {
-			result = float64(f.FinishedPartitions.Count()) / float64(f.TotalPartitions)
-		}
-	})
+	if f.TotalPartitions == 0 {
+		result = 0.0
+	} else {
+		result = float64(f.FinishedPartitions.Count()) / float64(f.TotalPartitions)
+	}
 	return result
 }
 
 // RemovePeer removes a peer and resets all its assigned partitions
 func (f *File) RemovePeer(peerID string) {
-	f.withWriteLock(func() {
-		f.forEachPartition(func(block *Partition) {
-			if block.GetPeerID() == peerID {
-				block.PeerID = ""
-				f.FinishedPartitions.Clear(uint(block.Number))
-			}
-		})
-		f.ActivePeers.Delete(peerID)
+	f.forEachPartition(func(block *Partition) {
+		if block.GetPeerID() == peerID {
+			block.PeerID = ""
+			f.FinishedPartitions.Clear(uint(block.Number))
+		}
 	})
+	f.ActivePeers.Delete(peerID)
 }
 
 // GetPartitionHTTPRange returns the HTTP range string for a partition

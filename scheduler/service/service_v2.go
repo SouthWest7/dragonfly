@@ -552,7 +552,7 @@ func (v *V2) DeleteTask(_ctx context.Context, req *schedulerv2.DeleteTaskRequest
 
 // AnnounceHost announces host to scheduler.
 func (v *V2) AnnounceHost(ctx context.Context, req *schedulerv2.AnnounceHostRequest) error {
-	// logger.WithHostID(req.Host.GetId()).Infof("announce host request: %#v", req.GetHost())
+	logger.WithHostID(req.Host.GetId()).Infof("announce host request: %#v", req.GetHost())
 
 	// Get cluster config by manager.
 	var concurrentUploadLimit int32
@@ -1071,6 +1071,30 @@ func (v *V2) DeleteHost(_ctx context.Context, req *schedulerv2.DeleteHostRequest
 	return nil
 }
 
+// SyncHost syncs host to scheduler.
+func (v *V2) SyncHost(ctx context.Context, req *schedulerv2.SyncHostRequest) error {
+	// logger.WithHostID(req.Host.GetId()).Infof("sync host request: %#v", req.GetHost().GetNetwork())
+	hostID := req.GetHost().GetId()
+
+	host, loaded := v.resource.HostManager().Load(hostID)
+	if !loaded {
+		msg := fmt.Sprintf("host %s not found", hostID)
+		logger.Error(msg)
+		return status.Error(codes.NotFound, msg)
+	}
+
+	downloadRate := req.GetHost().GetNetwork().GetDownloadRate()
+	uploadRate := req.GetHost().GetNetwork().GetUploadRate()
+	if downloadRate > 0 {
+		host.Network.DownloadRate = downloadRate
+	}
+	if uploadRate > 0 {
+		host.Network.UploadRate = uploadRate
+	}
+
+	return nil
+}
+
 // handleRegisterPeerRequest handles RegisterPeerRequest of AnnouncePeerRequest.
 func (v *V2) handleRegisterPeerRequest(ctx context.Context, stream schedulerv2.Scheduler_AnnouncePeerServer, hostID, taskID, peerID string, req *schedulerv2.RegisterPeerRequest) error {
 	// Handle resource included host, task, and peer.
@@ -1277,6 +1301,10 @@ func (v *V2) handleDownloadPeerFinishedRequest(ctx context.Context, peerID strin
 	peer.Cost.Store(time.Since(peer.CreatedAt.Load()))
 	if err := peer.FSM.Event(ctx, standard.PeerEventDownloadSucceeded); err != nil {
 		return status.Error(codes.Internal, err.Error())
+	}
+
+	if err := standard.FinishPartitionByPeer(peer.Task, peer.Host, peer); err != nil {
+		logger.WithPeerID(peerID).Errorf("[distributed] finish partition by peer failed: %s", err)
 	}
 
 	// Collect DownloadPeerCount and DownloadPeerDuration metrics.

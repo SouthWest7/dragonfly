@@ -408,11 +408,14 @@ type DistributeArgs struct {
 	// BlockLength is the block length for the file.
 	BlockLength *uint64 `json:"block_length" binding:"omitempty,gte=4194304"`
 
-	// ContentLength is the content length for the file.
-	ContentLength *uint64 `json:"content_length" binding:"omitempty,gte=1"`
+	// InitPeers is the init peers for the file.
+	InitPeers *uint64 `json:"init_peers" binding:"omitempty,gte=1"`
 
-	// RateLimit is the rate limit for the distribute.
-	RateLimit *uint64 `json:"rate_limit" binding:"omitempty,gte=1048576"`
+	// RateThreshold is the rate threshold for the distribute.
+	RateThreshold *uint64 `json:"rate_threshold" binding:"omitempty,gte=1048576"`
+
+	// Usage is the usage for the rate limit.
+	Usage *float32 `json:"usage" binding:"omitempty,gte=0,lte=1"`
 
 	// ScheduleInterval is the schedule interval for the distribute.
 	ScheduleInterval *uint64 `json:"schedule_interval" binding:"omitempty,gte=1"`

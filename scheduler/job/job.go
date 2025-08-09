@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"strings"
 	"sync"
 	"time"
@@ -858,73 +859,55 @@ func (j *job) distribute(ctx context.Context, data string) (string, error) {
 		return "", err
 	}
 
-	taskID := idgen.TaskIDV2ByURLBased(req.URL, req.PieceLength, req.Tag, req.Application, strings.Split(req.FilteredQueryParams, idgen.FilteredQueryParamsSeparator))
-	fileID := taskID
-
-	log := logger.WithTask(taskID, req.URL)
-
-	j.resource.HostManager().Range(func(key, value any) bool {
-		if host, ok := value.(*resource.Host); ok {
-			host.DeleteFile(taskID)
-		}
-		return true
-	})
-
-	// If seed peer is disabled, return error.
-	if !j.config.SeedPeer.Enable {
-		return "", fmt.Errorf("[distribute]: cluster %d scheduler %s has disabled seed peer", j.config.Manager.SchedulerClusterID, j.config.Server.AdvertiseIP)
-	}
-
-	// If scheduler has no available seed peer, return error.
-	if len(j.resource.SeedPeer().Client().Addrs()) == 0 {
-		return "", fmt.Errorf("[distribute]: cluster %d scheduler %s has no available seed peer", j.config.Manager.SchedulerClusterID, j.config.Server.AdvertiseIP)
+	hosts := j.resource.HostManager().LoadAll()
+	if len(hosts) == 0 {
+		logger.Warnf("[distribute]: cluster %d scheduler %s has no available host", j.config.Manager.SchedulerClusterID, j.config.Server.AdvertiseIP)
+		return "", fmt.Errorf("[distribute]: cluster %d scheduler %s has no available host", j.config.Manager.SchedulerClusterID, j.config.Server.AdvertiseIP)
 	}
 
 	// Create download task request
 	downloadReq := &dfdaemonv2.DownloadTaskRequest{
 		Download: &commonv2.Download{
-			Url:           req.URL,
-			PieceLength:   req.PieceLength,
-			Type:          commonv2.TaskType_STANDARD,
-			Priority:      commonv2.Priority_LEVEL0,
-			RequestHeader: req.Headers,
+			Url:                         req.URL,
+			PieceLength:                 req.PieceLength,
+			Type:                        commonv2.TaskType_STANDARD,
+			Priority:                    commonv2.Priority_LEVEL0,
+			RequestHeader:               req.Headers,
+			ContentForCalculatingTaskId: &req.URL,
 		},
 	}
 
-	hostPeerMap, err := j.distributeAllSeedPeers(ctx, taskID, downloadReq, log)
+	initPeers := int(*req.InitPeers)
+
+	hostPeerMap, taskID, initHosts, err := j.distributeInitPeers(ctx, hosts, downloadReq, initPeers)
 	if err != nil {
-		log.Errorf("[distribute]: distribute all seed peers failed: %s", err.Error())
+		logger.Errorf("[distribute]: distribute all seed peers failed: %s", err.Error())
 		return "", err
 	}
+	log := logger.WithTask(taskID, req.URL)
+	fileID := taskID
 
 	// Get task to retrieve actual content length
 	pieceLength := uint(*req.PieceLength)
 	var contentLength int64
-	if req.ContentLength == nil {
-		for {
-			task, ok := j.resource.TaskManager().Load(taskID)
-			if ok {
-				contentLength = task.ContentLength.Load()
-				if contentLength == -1 {
-					log.Warnf("[distribute]: task %s content length is 0, retry", taskID)
-					continue
-				}
-
-				log.Infof("[distribute]: loaded task %s, content length: %d", taskID, contentLength)
-				break
+	for {
+		task, ok := j.resource.TaskManager().Load(taskID)
+		if ok {
+			contentLength = task.ContentLength.Load()
+			if contentLength == -1 {
+				log.Warnf("[distribute]: task %s content length is -1, retry", taskID)
+				continue
 			}
-			time.Sleep(1 * time.Second)
+
+			log.Infof("[distribute]: loaded task %s, content length: %d", taskID, contentLength)
+			break
 		}
-	} else {
-		log.Infof("[distribute]: content length: %d", *req.ContentLength)
-		contentLength = int64(*req.ContentLength)
+		log.Warnf("[distribute]: task %s is not found, retry", taskID)
+		time.Sleep(5 * time.Second)
 	}
 
 	// Set default block length if not specified, default 4MB.
 	blockLength := uint64(*req.BlockLength)
-
-	// Set default rate limit if not specified, default 1MB.
-	rateLimit := uint64(*req.RateLimit)
 
 	// Set default schedule interval if not specified, default 1 milliseconds.
 	scheduleInterval := uint64(*req.ScheduleInterval)
@@ -952,32 +935,33 @@ func (j *job) distribute(ctx context.Context, data string) (string, error) {
 		return true
 	})
 
-	go func() {
-		for hostID, peerID := range hostPeerMap {
-			if host, ok := j.resource.HostManager().Load(hostID); ok {
-				if file, ok := host.LoadFile(taskID); ok {
-					if !file.IsFinished() {
-						for i := int32(0); i < int32(file.TotalPartitions); i++ {
-							if file.FinishedPartitions.Test(uint(i)) {
-								continue
-							}
+	for hostID, peerID := range hostPeerMap {
+		resource.FinishFile(j.resource, hostID, taskID, peerID)
+	}
 
-							if _, err := file.AssignPartitionToPeer(i, peerID); err != nil {
-								log.Warnf("[distribute]: failed to assign block %d to seed peer %s: %s", i, peerID, err.Error())
-								continue
-							}
+	// Convert host to [3]string tuple: [hostID, hostIP, hostType]
+	var superSeed [3]string
+	if len(initHosts) > 0 {
+		superSeed[0] = initHosts[0].ID
+		superSeed[1] = taskID
+		superSeed[2] = hostPeerMap[initHosts[0].ID]
+	}
+	// distribute := NewDistribute(j.resource, schedulerFile, req.URL, rateLimit, scheduleInterval, superSeed, len(availableHosts))
 
-							if err := file.FinishPartitionBackToSource(i); err != nil {
-								log.Warnf("[distribute]: failed to complete block %d for seed peer %s: %s", i, peerID, err.Error())
-							}
-						}
-					}
-				}
-			}
-		}
-	}()
-
-	distribute := NewDistribute(j.resource, schedulerFile, rateLimit, scheduleInterval)
+	distribute := Distribute{
+		resource:         j.resource,
+		file:             schedulerFile,
+		url:              req.URL,
+		downloadQueue:    make([]string, 0),
+		uploadQueue:      make(map[int32][]string),
+		rateLimit:        1310720000,
+		rateThreshold:    uint64(*req.RateThreshold),
+		usage:            *req.Usage,
+		scheduleInterval: time.Duration(scheduleInterval) * time.Millisecond,
+		superSeed:        superSeed,
+		superSeedEnabled: true,
+		hostNumber:       len(availableHosts),
+	}
 
 	// Start file distribution to all hosts
 	log.Infof("[distribute]: starting file distribution to %d hosts", len(availableHosts))
@@ -1000,26 +984,33 @@ func (j *job) distribute(ctx context.Context, data string) (string, error) {
 	return "success", nil
 }
 
-func (j *job) distributeAllSeedPeers(ctx context.Context, taskID string, req *dfdaemonv2.DownloadTaskRequest, log *logger.SugaredLoggerOnWith) (map[string]string, error) {
-	// If scheduler has no available seed peer, return error.
-	percentage := uint8(100)
-	seedPeers, err := j.selectSeedPeers(nil, &percentage, log)
-	if err != nil {
-		log.Infof("[distribute]: select seed peers failed: %s", err.Error())
-		return nil, err
-	}
+func (j *job) distributeInitPeers(ctx context.Context, hosts []*resource.Host, req *dfdaemonv2.DownloadTaskRequest, initPeers int) (map[string]string, string, []*resource.Host, error) {
 	var (
 		hostPeerMap = make(map[string]string) // hostID -> peerID mapping
+		taskID      string
 		mu          sync.Mutex
 	)
 
-	log.Infof("[distribute]: distribute to %d seed peers", len(seedPeers))
+	// Randomly select initPeers hosts from available hosts
+	selectedHosts := make([]*resource.Host, 0, initPeers)
+	if len(hosts) <= initPeers {
+		// If we have fewer or equal hosts than needed, use all
+		selectedHosts = hosts
+	} else {
+		// Randomly select initPeers hosts
+		indices := rand.Perm(len(hosts))[:initPeers]
+		for _, idx := range indices {
+			selectedHosts = append(selectedHosts, hosts[idx])
+		}
+	}
+
+	logger.Infof("[distribute]: distribute to %d init peers", initPeers)
 	eg, _ := errgroup.WithContext(ctx)
-	for _, seedPeer := range seedPeers {
+	for _, host := range selectedHosts {
 		var (
-			hostname = seedPeer.Hostname
-			ip       = seedPeer.Ip
-			port     = seedPeer.Port
+			hostname = host.Hostname
+			ip       = host.IP
+			port     = host.Port
 		)
 
 		addr := fmt.Sprintf("%s:%d", ip, port)
@@ -1034,7 +1025,7 @@ func (j *job) distributeAllSeedPeers(ctx context.Context, taskID string, req *df
 				return err
 			}
 
-			stream, err := dfdaemonClient.DownloadTask(ctx, taskID, req)
+			stream, err := dfdaemonClient.DownloadTask(ctx, "", req)
 			if err != nil {
 				log.Errorf("[distribute]: distribute failed: %s", err.Error())
 				return err
@@ -1052,6 +1043,7 @@ func (j *job) distributeAllSeedPeers(ctx context.Context, taskID string, req *df
 					return err
 				}
 				mu.Lock()
+				taskID = req.TaskId
 				hostPeerMap[req.HostId] = req.PeerId
 				mu.Unlock()
 			}
@@ -1060,10 +1052,10 @@ func (j *job) distributeAllSeedPeers(ctx context.Context, taskID string, req *df
 
 	// Wait for all goroutines to complete
 	if err := eg.Wait(); err != nil {
-		return nil, err
+		return nil, "", nil, err
 	}
 
-	log.Infof("[distribute]: distribute to %d seed peers completed", len(seedPeers))
+	logger.Infof("[distribute]: distribute to %d seed peers completed", len(selectedHosts))
 
-	return hostPeerMap, nil
+	return hostPeerMap, taskID, selectedHosts, nil
 }

@@ -185,9 +185,9 @@ func (s *service) CreateDistributeJob(ctx context.Context, json types.CreateDist
 		*json.Args.BlockLength = 4194304
 	}
 
-	if json.Args.RateLimit == nil {
-		json.Args.RateLimit = new(uint64)
-		*json.Args.RateLimit = 1048576
+	if json.Args.RateThreshold == nil {
+		json.Args.RateThreshold = new(uint64)
+		*json.Args.RateThreshold = 1048576
 	}
 
 	if json.Args.ScheduleInterval == nil {

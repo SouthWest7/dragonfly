@@ -19,6 +19,7 @@ package job
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"sort"
 	"sync"
 	"time"
@@ -39,11 +40,20 @@ type Distribute struct {
 	// Resource is the resource manager for the scheduler.
 	resource standard.Resource
 
+	// URL is the URL of the file.
+	url string
+
 	// File is the file to be distributed.
 	file *standard.File
 
-	// Events is the set of events.
-	events *sync.Map
+	// HostNumber is the number of hosts.
+	hostNumber int
+
+	// SuperSeed is the super seed for the file as [hostID, taskID, peerID].
+	superSeed [3]string
+
+	// SuperSeedEnabled is the super seed mode for the file.
+	superSeedEnabled bool
 
 	// DownloadQueue is the queue of host IDs to be downloaded.
 	downloadQueue []string
@@ -51,34 +61,23 @@ type Distribute struct {
 	// UploadQueue is the map of block sources.
 	uploadQueue map[int32][]string
 
-	// RateLimit is the rate limit for the scheduler.
+	// RateLimit is the rate limit for the peer.
 	rateLimit uint64
+
+	// RateThreshold is the rate threshold for the peer.
+	rateThreshold uint64
+
+	// Usage is the usage for the rate limit.
+	usage float32
 
 	// ScheduleInterval is the schedule interval for the scheduler.
 	scheduleInterval time.Duration
-
-	// BandwidthUseRatio is the ratio of bandwidth to be used.
-	bandwidthUseRatio float64
 
 	// DownloadQueueMu is the mutex for download queue operations.
 	downloadQueueMu sync.RWMutex
 
 	// UploadQueueMu is the mutex for upload queue operations.
 	uploadQueueMu sync.RWMutex
-}
-
-// NewDistribute creates a new event-driven scheduler
-func NewDistribute(resource standard.Resource, file *standard.File, rateLimit uint64, scheduleInterval uint64) *Distribute {
-	return &Distribute{
-		resource:          resource,
-		file:              file,
-		events:            &sync.Map{},
-		downloadQueue:     make([]string, 0),
-		uploadQueue:       make(map[int32][]string),
-		rateLimit:         rateLimit,
-		scheduleInterval:  time.Duration(scheduleInterval) * time.Millisecond,
-		bandwidthUseRatio: 0.8,
-	}
 }
 
 // Run starts the event-driven file distribution
@@ -106,23 +105,28 @@ func (es *Distribute) Run(ctx context.Context, fileID string, taskID string, url
 			continue
 		}
 
-		hostID := es.downloadQueue[0]
+		workQueue := make([]string, len(es.downloadQueue))
+		copy(workQueue, es.downloadQueue)
+		for len(workQueue) > 0 {
+			hostID := workQueue[0]
+			workQueue = workQueue[1:]
 
-		if es.canScheduleDownload(hostID) {
+			if !es.canScheduleDownload(hostID) {
+				continue
+			}
+
 			blockNumber := es.selectBlockForPeer(hostID, count)
+			logger.Infof("[distribute]: selected block %d for peer %s, count: %d", blockNumber, hostID, count)
 			if blockNumber != -1 {
 				eventID := standard.EventID(hostID, es.file.ID, blockNumber)
 				event := es.createEvent(eventID, blockNumber, taskID, hostID)
 				if event != nil {
-					es.StoreEvent(event)
-
 					go es.downloadBlock(ctx, event, taskID, url, headers, pieceLength, contentForCalculatingTaskId, count)
 
-					logger.Debugf("[distribute]: scheduled one download block %d to peer %s, count: %d", blockNumber, hostID, count)
+					es.superSeedMode(blockNumber, count)
+					logger.Infof("[distribute]: scheduled one download block %d to peer %s, count: %d", blockNumber, hostID, count)
 				}
 			}
-
-			logger.Infof("[distribute]: scheduled one download for peer %s, count: %d", hostID, count)
 		}
 
 		time.Sleep(es.scheduleInterval)
@@ -177,15 +181,17 @@ func (es *Distribute) downloadBlock(ctx context.Context, event *standard.Event, 
 
 	downloadReq := &dfdaemonv2.DownloadTaskRequest{
 		Download: &commonv2.Download{
-			Url:           url,
-			PieceLength:   pieceLength,
-			Type:          commonv2.TaskType_STANDARD,
-			Priority:      commonv2.Priority_LEVEL0,
-			RequestHeader: requestHeaders,
-			Range:         blockRange,
+			Url:                         url,
+			PieceLength:                 pieceLength,
+			Type:                        commonv2.TaskType_STANDARD,
+			Priority:                    commonv2.Priority_LEVEL0,
+			RequestHeader:               requestHeaders,
+			Range:                       blockRange,
+			ContentForCalculatingTaskId: &es.url,
 		},
 	}
 
+	logger.Infof("[distribute]: send download request to peer %s, count: %d", event.DownloadHost, count)
 	stream, err := client.DownloadTask(ctx, taskID, downloadReq)
 	if err != nil {
 		logger.Errorf("[distribute]: failed to start download: %s", err.Error())
@@ -198,6 +204,8 @@ func (es *Distribute) downloadBlock(ctx context.Context, event *standard.Event, 
 		if err != nil {
 			if err == io.EOF {
 				logger.Infof("[distribute]: download completed for block %d, peer %s, count: %d", event.BlockNumber, event.DownloadHost, count)
+				es.releaseRate(event.DownloadHost, event.AllocatedDownloadRate, false)
+				es.releaseRate(event.UploadPeers[0], event.AllocatedUploadRate, true)
 				break
 			}
 			block.State = standard.PartitionStateFailed
@@ -212,9 +220,6 @@ func (es *Distribute) downloadBlock(ctx context.Context, event *standard.Event, 
 		block.State = standard.PartitionStateCompleted
 		logger.Infof("[distribute]: file %s completed block %d for peer %s, count: %d", es.file.ID, event.BlockNumber, event.DownloadHost, count)
 	}
-
-	es.releaseRate(event.DownloadHost, event.AllocatedDownloadRate, false)
-	es.releaseRate(event.UploadPeers[0], event.AllocatedUploadRate, true)
 }
 
 // selectBlockForPeer selects the best block for a peer
@@ -237,24 +242,66 @@ func (es *Distribute) selectBlockForPeer(hostID string, count int) int32 {
 		return -1
 	}
 
-	var bestBlock int32 = -1
-	minSources := int(^uint(0) >> 1)
+	var bestBlocks []int32
+	minSources := es.hostNumber
 
 	es.uploadQueueMu.RLock()
 	defer es.uploadQueueMu.RUnlock()
 
 	for _, blockNumber := range missingBlocks {
 		if sources, exists := es.uploadQueue[blockNumber]; exists {
-			if len(sources) < minSources && len(sources) > 0 {
-				minSources = len(sources)
-				bestBlock = blockNumber
+			if len(sources) > 0 {
+				if len(sources) < minSources {
+					// 找到更少源的块，重置候选列表
+					minSources = len(sources)
+					bestBlocks = []int32{blockNumber}
+				} else if len(sources) == minSources {
+					// 找到相同源数量的块，添加到候选列表
+					bestBlocks = append(bestBlocks, blockNumber)
+				}
 			}
 		}
 	}
 
-	logger.Infof("[distribute]: select block %d for host %s, count: %d", bestBlock, hostID, count)
+	// 如果有候选块，随机选择一个
+	if len(bestBlocks) > 0 {
+		// 使用时间种子创建随机数生成器确保真随机
+		r := rand.New(rand.NewSource(time.Now().UnixNano()))
+		randomIndex := r.Intn(len(bestBlocks))
+		return bestBlocks[randomIndex]
+	}
 
-	return bestBlock
+	return -1
+}
+
+func (es *Distribute) superSeedMode(partitionNumber int32, count int) {
+	// superSeed[0] is hostID, superSeed[1] is taskID, superSeed[2] is peerID
+	hostID, taskID, peerID := es.superSeed[0], es.superSeed[1], es.superSeed[2]
+	if es.getHostIdleUploadRate(hostID) < es.rateThreshold {
+		return
+	}
+
+	// Find the host using the hostID and then load the file
+	host, found := es.resource.HostManager().Load(hostID)
+	if !found {
+		return
+	}
+
+	file, found := host.LoadFile(es.file.ID)
+	if !found {
+		return
+	}
+
+	if file.FinishedPartitions.Test(uint(partitionNumber)) {
+		if file.FinishedPartitions.Count() < es.file.TotalPartitions/3 {
+			es.superSeedEnabled = false
+			standard.FinishFile(es.resource, hostID, taskID, peerID)
+			return
+		} else {
+			file.FinishedPartitions.Clear(uint(partitionNumber))
+			logger.Infof("[distribute]: clear block %d for super seed, count: %d", partitionNumber, count)
+		}
+	}
 }
 
 // createUploadQueue creates the upload queue for the scheduler.
@@ -264,15 +311,22 @@ func (es *Distribute) createUploadQueue(count int) {
 
 	es.uploadQueue = make(map[int32][]string)
 
-	// For each block, find hosts that have it
+	// For each partition, find hosts that have it or downloading it
 	for i := int32(0); i < int32(es.file.TotalPartitions); i++ {
 		var sources []string
 		es.resource.HostManager().Range(func(key, value any) bool {
 			if hostID, ok := key.(string); ok {
 				if host, ok := value.(*standard.Host); ok {
-					if file, found := host.LoadFile(es.file.ID); found {
-						if file.FinishedPartitions.Test(uint(i)) && es.getHostIdleUploadRate(hostID) > es.rateLimit {
-							sources = append(sources, hostID)
+					if es.getHostIdleUploadRate(hostID) > es.rateThreshold {
+						if file, found := host.LoadFile(es.file.ID); found {
+							if file.FinishedPartitions.Test(uint(i)) {
+								sources = append(sources, hostID)
+							} else if partition, exists := file.GetPartition(i); exists {
+								peer, exists := es.resource.PeerManager().Load(partition.PeerID)
+								if exists && peer.FSM.Is(standard.PeerStateSucceeded) {
+									sources = append(sources, hostID)
+								}
+							}
 						}
 					}
 				}
@@ -291,8 +345,6 @@ func (es *Distribute) createUploadQueue(count int) {
 			es.uploadQueue[i] = sources
 		}
 	}
-
-	logger.Infof("[distribute]: create upload queue %#v, count: %d", es.uploadQueue, count)
 }
 
 // createDownloadQueue creates the download queue for the scheduler.
@@ -304,13 +356,18 @@ func (es *Distribute) createDownloadQueue(count int) int {
 
 	es.resource.HostManager().Range(func(key, value any) bool {
 		if hostID, ok := key.(string); ok {
+			if hostID == es.superSeed[0] {
+				logger.Infof("[distribute]: host %s is super seed, count: %d", hostID, count)
+				return true
+			}
 			if host, ok := value.(*standard.Host); ok {
-				if file, found := host.LoadFile(es.file.ID); found {
-					missing := file.GetMissingPartitions()
-					logger.Infof("[distribute]: host %s has %v missing blocks, count: %d", hostID, missing, count)
-					// Check if host has missing blocks and sufficient download bandwidth
-					if len(missing) > 0 && es.getHostIdleDownloadRate(hostID) > es.rateLimit {
-						es.downloadQueue = append(es.downloadQueue, hostID)
+				if es.getHostIdleDownloadRate(hostID) > es.rateThreshold {
+					if file, found := host.LoadFile(es.file.ID); found {
+						missing := file.GetMissingPartitions()
+						if len(missing) > 0 {
+							logger.Infof("[distribute]: host %s has %v missing blocks, idle download rate: %d, rate limit: %d", hostID, missing, es.getHostIdleDownloadRate(hostID), es.rateThreshold)
+							es.downloadQueue = append(es.downloadQueue, hostID)
+						}
 					}
 				}
 			}
@@ -340,7 +397,7 @@ func (es *Distribute) createDownloadQueue(count int) int {
 		return missingI > missingJ
 	})
 
-	logger.Infof("[distribute]: create download queue with %d peers, count: %d", len(es.downloadQueue), count)
+	logger.Infof("[distribute]: download queue: %v", es.downloadQueue)
 
 	return len(es.downloadQueue)
 }
@@ -366,7 +423,7 @@ func (es *Distribute) createEvent(id string, blockNumber int32, taskID string, h
 		return nil
 	}
 
-	parentID := parents[0]
+	parentID := parents[rand.Intn(len(parents))]
 	parent, exists := es.resource.HostManager().Load(parentID)
 	if !exists {
 		return nil
@@ -385,14 +442,17 @@ func (es *Distribute) createEvent(id string, blockNumber int32, taskID string, h
 	block.ParentID = parentBlock.PeerID
 
 	idleUploadRate := es.getHostIdleUploadRate(parentID)
+	logger.Infof("[distribute]: parent %s real upload rate: %d, allocated upload rate: %d", parentID, parent.Network.UploadRate, parent.Network.AllocatedUploadRate)
 	idleDownloadRate := es.getHostIdleDownloadRate(hostID)
+	logger.Infof("[distribute]: idle upload rate: %d, idle download rate: %d", idleUploadRate, idleDownloadRate)
 
-	var allocatedRate uint64
+	allocatedRate := idleUploadRate
 
 	if idleUploadRate > idleDownloadRate {
 		allocatedRate = idleDownloadRate
-	} else {
-		allocatedRate = idleUploadRate
+	}
+	if allocatedRate > uint64(float64(es.rateLimit)*float64(es.usage)) {
+		allocatedRate = uint64(float64(es.rateLimit) * float64(es.usage))
 	}
 
 	logger.Infof("[distribute]: allocated rate %d for parent %s and host %s", allocatedRate, parentID, hostID)
@@ -407,8 +467,8 @@ func (es *Distribute) createEvent(id string, blockNumber int32, taskID string, h
 
 // canScheduleDownload checks if a host can be scheduled for download.
 func (es *Distribute) canScheduleDownload(hostID string) bool {
-	logger.Infof("[distribute]: host %s idle download rate: %d, rate limit: %d", hostID, es.getHostIdleDownloadRate(hostID), es.rateLimit)
-	return es.getHostIdleDownloadRate(hostID) > es.rateLimit
+	// logger.Infof("[distribute]: host %s idle download rate: %d, rate limit: %d", hostID, es.getHostIdleDownloadRate(hostID), es.rateLimit)
+	return es.getHostIdleDownloadRate(hostID) > es.rateThreshold
 }
 
 // isDistributionFinished checks if the distribution is finished.
@@ -434,10 +494,16 @@ func (es *Distribute) getHostIdleUploadRate(hostID string) uint64 {
 		return 0
 	}
 
-	occupied := host.Network.UploadRate
-	if host.Network.UploadRate > host.Network.AllocatedUploadRate {
-		occupied = host.Network.AllocatedUploadRate
+	realRate := host.Network.UploadRate
+	occupied := realRate
+	allocatedRate := host.Network.AllocatedUploadRate
+	if realRate < allocatedRate {
+		occupied = allocatedRate
 	}
+	if host.Network.UploadRateLimit < occupied {
+		return 0
+	}
+
 	return host.Network.UploadRateLimit - occupied
 }
 
@@ -448,10 +514,16 @@ func (es *Distribute) getHostIdleDownloadRate(hostID string) uint64 {
 		return 0
 	}
 
-	occupied := host.Network.DownloadRate
-	if host.Network.DownloadRate > host.Network.AllocatedDownloadRate {
-		occupied = host.Network.AllocatedDownloadRate
+	realRate := host.Network.DownloadRate
+	occupied := realRate
+	allocatedRate := host.Network.AllocatedDownloadRate
+	if realRate < allocatedRate {
+		occupied = allocatedRate
 	}
+	if host.Network.DownloadRateLimit < occupied {
+		return 0
+	}
+
 	return host.Network.DownloadRateLimit - occupied
 }
 
@@ -473,17 +545,4 @@ func (es *Distribute) releaseRate(hostID string, rate uint64, isUpload bool) {
 	}
 
 	host.ReleaseRate(rate, isUpload)
-}
-
-func (es *Distribute) LoadEvent(id string) *standard.Event {
-	event, ok := es.events.Load(id)
-	if !ok {
-		return nil
-	}
-
-	return event.(*standard.Event)
-}
-
-func (es *Distribute) StoreEvent(event *standard.Event) {
-	es.events.Store(event.ID, event)
 }
